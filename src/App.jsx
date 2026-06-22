@@ -1,383 +1,215 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
-/* ============================================================================
-   KENYABEATS — Music Intelligence Platform
-   Live data: Supabase (charts/artists/genres/events) + YouTube Data API
-   AI: Claude analyst
-   ============================================================================ */
+/* ════════════════════════════════════════════════════════════════════════════
+   KENYABEATS — Music Intelligence
+   Truth source: YouTube's own mostPopular MUSIC chart for Kenya (region KE).
+   Persistence + cache: Supabase. AI brief: Claude.
+   ════════════════════════════════════════════════════════════════════════════ */
 
-const SUPABASE_URL = "https://uinxdkpnxwyrecnxjhdm.supabase.co";
-const SUPABASE_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVpbnhka3BueHd5cmVjbnhqaGRtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIxNTU4MTEsImV4cCI6MjA5NzczMTgxMX0.icGL80eUNTJkZNvX39GpfJbhKmAh9xFqpsoBKSHHDUE";
-const YT_FN = `${SUPABASE_URL}/functions/v1/youtube-sync`;
-const HEADERS = { apikey: SUPABASE_ANON, Authorization: `Bearer ${SUPABASE_ANON}` };
+const SB = "https://uinxdkpnxwyrecnxjhdm.supabase.co";
+const ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVpbnhka3BueHd5cmVjbnhqaGRtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIxNTU4MTEsImV4cCI6MjA5NzczMTgxMX0.icGL80eUNTJkZNvX39GpfJbhKmAh9xFqpsoBKSHHDUE";
+const FN = `${SB}/functions/v1/youtube-sync`;
+const H = { apikey: ANON, Authorization: `Bearer ${ANON}` };
 
-// ── Supabase helpers ─────────────────────────────────────────────────────────
-async function sbGet(table, qs = "") {
-  const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?select=*${qs}`, { headers: HEADERS });
-  if (!r.ok) throw new Error(`${table} ${r.status}`);
-  return r.json();
+/* ── data helpers ─────────────────────────────────────────────────────────── */
+const sbGet = async (t, qs = "") => { const r = await fetch(`${SB}/rest/v1/${t}?select=*${qs}`, { headers: H }); return r.ok ? r.json() : []; };
+const sbDel = (t, qs) => fetch(`${SB}/rest/v1/${t}?${qs}`, { method: "DELETE", headers: H });
+const sbIns = (t, body) => fetch(`${SB}/rest/v1/${t}`, { method: "POST", headers: { ...H, "Content-Type": "application/json", Prefer: "return=minimal" }, body: JSON.stringify(body) });
+
+async function ytTrending(max = 20) {
+  const r = await fetch(`${FN}?action=trending&region=KE&max=${max}`);
+  const d = await r.json();
+  if (d.error) throw new Error(d.error);
+  return d.items || [];
 }
-
-async function sbUpload(file) {
-  const path = `clip_${Date.now()}_${file.name.replace(/[^a-z0-9.]/gi, "_")}`;
-  const up = await fetch(`${SUPABASE_URL}/storage/v1/object/bg-clips/${path}`, {
-    method: "POST",
-    headers: { ...HEADERS, "Content-Type": file.type },
-    body: file,
-  });
-  if (!up.ok) throw new Error("upload failed");
-  await fetch(`${SUPABASE_URL}/rest/v1/bg_clips`, {
-    method: "POST",
-    headers: { ...HEADERS, "Content-Type": "application/json", Prefer: "return=minimal" },
-    body: JSON.stringify({ label: file.name, storage_path: path, source: "upload" }),
-  });
-  return `${SUPABASE_URL}/storage/v1/object/public/bg-clips/${path}`;
-}
-
-// ── YouTube via Edge Function ────────────────────────────────────────────────
-async function ytSearch(q, max = 10) {
-  const r = await fetch(`${YT_FN}?action=search&q=${encodeURIComponent(q)}&max=${max}`);
-  if (!r.ok) throw new Error("yt search failed");
+async function ytSearchFn(q, max = 8) {
+  const r = await fetch(`${FN}?action=search&q=${encodeURIComponent(q)}&max=${max}`);
   const d = await r.json();
   return d.items || [];
 }
-
-async function ytStats(ids) {
-  if (!ids?.length) return {};
-  const r = await fetch(`${YT_FN}?action=stats&ids=${ids.join(",")}`);
-  if (!r.ok) throw new Error("yt stats failed");
-  const d = await r.json();
-  return Object.fromEntries((d.items || []).map(i => [i.videoId, i]));
+async function uploadClip(file) {
+  const path = `clip_${Date.now()}_${file.name.replace(/[^a-z0-9.]/gi, "_")}`;
+  const up = await fetch(`${SB}/storage/v1/object/bg-clips/${path}`, { method: "POST", headers: { ...H, "Content-Type": file.type }, body: file });
+  if (!up.ok) throw new Error("upload failed");
+  const url = `${SB}/storage/v1/object/public/bg-clips/${path}`;
+  await sbIns("bg_clips", { label: file.name, storage_path: path, source: "upload", active: true });
+  return url;
 }
 
-// ── Design tokens ────────────────────────────────────────────────────────────
+/* ── tokens ───────────────────────────────────────────────────────────────── */
 const C = {
-  ink: "#05060D", night: "#0A0C18",
-  panel: "rgba(16,19,36,0.78)", border: "rgba(100,130,255,0.13)",
-  blue: "#2E6BFF", sky: "#27C4FF", orange: "#FF5A1F", amber: "#FFB020", gold: "#FFD23F",
-  white: "#FFFFFF", mist: "#9AAAC8", green: "#1EE07F", pink: "#FF4D8D",
+  ink: "#060710", void: "#03040A", night: "#0A0D1C",
+  glass: "rgba(18,22,42,0.55)", glassHi: "rgba(28,34,64,0.7)", line: "rgba(120,150,255,0.12)",
+  blue: "#2F6BFF", sky: "#22CCFF", cyan: "#00E5D0", orange: "#FF5A1F", amber: "#FF9D1C", gold: "#FFD23F",
+  white: "#FFFFFF", mist: "#94A3C8", dim: "#5C6789", green: "#16E085", pink: "#FF3D8B", purple: "#9D5BFF",
 };
+const FONTS = `@import url('https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=Outfit:wght@200;300;400;500;600;700;800&family=Space+Mono:ital,wght@0,400;0,700;1,400&display=swap');`;
 
-const FONTS = `
-@import url('https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=Outfit:wght@300;400;500;600;700;800&family=Space+Mono:ital,wght@0,400;0,700;1,400&display=swap');
-`;
-
-// ── Animation helpers ────────────────────────────────────────────────────────
-function useOnScreen() {
-  const ref = useRef(null);
-  const [vis, setVis] = useState(false);
-  useEffect(() => {
-    const el = ref.current; if (!el) return;
-    const io = new IntersectionObserver(([e]) => { if (e.isIntersecting) { setVis(true); io.disconnect(); } }, { threshold: 0.1 });
-    io.observe(el); return () => io.disconnect();
-  }, []);
-  return [ref, vis];
+/* ── motion utilities ─────────────────────────────────────────────────────── */
+function useOnScreen(th = 0.1) {
+  const ref = useRef(null); const [v, setV] = useState(false);
+  useEffect(() => { const el = ref.current; if (!el) return; const io = new IntersectionObserver(([e]) => e.isIntersecting && (setV(true), io.disconnect()), { threshold: th }); io.observe(el); return () => io.disconnect(); }, [th]);
+  return [ref, v];
+}
+function Reveal({ children, d = 0, y = 24 }) {
+  const [ref, v] = useOnScreen();
+  return <div ref={ref} style={{ opacity: v ? 1 : 0, transform: v ? "none" : `translateY(${y}px)`, transition: `opacity .7s cubic-bezier(.2,.8,.2,1) ${d}ms, transform .7s cubic-bezier(.2,.8,.2,1) ${d}ms` }}>{children}</div>;
+}
+function CountUp({ to, dur = 1500, fmt = true }) {
+  const [n, setN] = useState(0); const [ref, v] = useOnScreen();
+  useEffect(() => { if (!v) return; let raf; const t0 = performance.now(); const tk = t => { const p = Math.min((t - t0) / dur, 1); setN(to * (1 - Math.pow(1 - p, 3))); if (p < 1) raf = requestAnimationFrame(tk); }; raf = requestAnimationFrame(tk); return () => cancelAnimationFrame(raf); }, [v, to, dur]);
+  const s = !fmt ? Math.round(n).toLocaleString() : n >= 1e9 ? (n / 1e9).toFixed(1) + "B" : n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(0) + "K" : Math.round(n).toLocaleString();
+  return <span ref={ref}>{s}</span>;
+}
+function Bar({ pct, color, d = 0 }) {
+  const [w, setW] = useState(0); const [ref, v] = useOnScreen();
+  useEffect(() => { if (v) { const t = setTimeout(() => setW(pct), d); return () => clearTimeout(t); } }, [v, pct, d]);
+  return <div ref={ref} style={{ height: 6, background: "rgba(255,255,255,.06)", borderRadius: 4, overflow: "hidden" }}><div style={{ height: "100%", width: `${w}%`, background: `linear-gradient(90deg,${color},${color}66)`, borderRadius: 4, transition: "width 1.2s cubic-bezier(.2,.8,.2,1)", boxShadow: `0 0 12px ${color}66` }} /></div>;
 }
 
-function Reveal({ children, delay = 0 }) {
-  const [ref, vis] = useOnScreen();
-  return (
-    <div ref={ref} style={{ opacity: vis ? 1 : 0, transform: vis ? "none" : "translateY(22px)", transition: `opacity .65s ease ${delay}ms, transform .65s ease ${delay}ms` }}>
-      {children}
-    </div>
-  );
-}
-
-function CountUp({ to, dur = 1400 }) {
-  const [val, setVal] = useState(0);
-  const [ref, vis] = useOnScreen();
-  useEffect(() => {
-    if (!vis) return;
-    let raf; const t0 = performance.now();
-    const tick = now => {
-      const p = Math.min((now - t0) / dur, 1), e = 1 - Math.pow(1 - p, 3);
-      setVal(Math.round(to * e));
-      if (p < 1) raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, [vis, to, dur]);
-  const fmt = val >= 1e6 ? (val / 1e6).toFixed(1) + "M" : val >= 1e3 ? (val / 1e3).toFixed(0) + "K" : val.toLocaleString();
-  return <span ref={ref}>{fmt}</span>;
-}
-
-function Bar({ pct, color, delay = 0 }) {
-  const [w, setW] = useState(0);
-  const [ref, vis] = useOnScreen();
-  useEffect(() => { if (vis) { const t = setTimeout(() => setW(pct), delay); return () => clearTimeout(t); } }, [vis, pct, delay]);
-  return (
-    <div ref={ref} style={{ height: 6, background: "rgba(255,255,255,0.07)", borderRadius: 3, overflow: "hidden" }}>
-      <div style={{ height: "100%", width: `${w}%`, background: `linear-gradient(90deg,${color},${color}88)`, borderRadius: 3, transition: "width 1.1s cubic-bezier(.2,.8,.2,1)", boxShadow: `0 0 10px ${color}55` }} />
-    </div>
-  );
-}
-
-function Ring({ score, color, size = 56 }) {
-  const r = size / 2 - 5, circ = 2 * Math.PI * r;
-  const [dash, setDash] = useState(0);
-  const [ref, vis] = useOnScreen();
-  useEffect(() => { if (vis) { const t = setTimeout(() => setDash((score / 100) * circ), 250); return () => clearTimeout(t); } }, [vis, score, circ]);
-  return (
-    <svg ref={ref} width={size} height={size} style={{ transform: "rotate(-90deg)" }}>
-      <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="rgba(255,255,255,0.08)" strokeWidth={4} />
-      <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={color} strokeWidth={4}
-        strokeDasharray={circ} strokeDashoffset={circ - dash} strokeLinecap="round"
-        style={{ transition: "stroke-dashoffset 1.2s cubic-bezier(.2,.8,.2,1)", filter: `drop-shadow(0 0 4px ${color})` }} />
-      <text x={size/2} y={size/2} textAnchor="middle" dominantBaseline="central"
-        style={{ transform:"rotate(90deg)", transformOrigin:"center", fill:C.white, fontSize:13, fontFamily:"'Space Mono',monospace", fontWeight:700 }}>{score}</text>
-    </svg>
-  );
-}
-
-// ── Equalizer ────────────────────────────────────────────────────────────────
-function EQ({ bars = 36, h = 54, color }) {
+/* ── EQ + mesh ────────────────────────────────────────────────────────────── */
+function EQ({ bars = 40, h = 52, color }) {
   const [vals, setVals] = useState(() => Array(bars).fill(0).map(() => Math.random()));
-  useEffect(() => { const id = setInterval(() => setVals(Array(bars).fill(0).map(() => Math.random())), 130); return () => clearInterval(id); }, [bars]);
-  return (
-    <div style={{ display:"flex", alignItems:"flex-end", gap:3, height:h }}>
-      {vals.map((v, i) => (
-        <div key={i} style={{ flex:1, height:`${18+v*82}%`, background:`linear-gradient(180deg,${color||C.sky},${C.orange})`, borderRadius:3, transition:"height .13s ease", opacity:.6+v*.4 }} />
-      ))}
-    </div>
-  );
+  useEffect(() => { const id = setInterval(() => setVals(Array(bars).fill(0).map(() => Math.random())), 120); return () => clearInterval(id); }, [bars]);
+  return <div style={{ display: "flex", alignItems: "flex-end", gap: 3, height: h }}>{vals.map((v, i) => <div key={i} style={{ flex: 1, height: `${16 + v * 84}%`, background: `linear-gradient(180deg,${color || C.cyan},${C.orange})`, borderRadius: 3, transition: "height .12s ease", opacity: .55 + v * .45 }} />)}</div>;
 }
-
-// ── Animated mesh background (fallback when no video) ───────────────────────
 function Mesh() {
   const ref = useRef(null);
   useEffect(() => {
-    const cv = ref.current; if (!cv) return;
-    const ctx = cv.getContext("2d");
-    let raf, t = 0;
-    const blobs = [
-      {bx:.22,by:.28,r:340,c:C.blue,sx:.00016,sy:.00012},
-      {bx:.78,by:.32,r:310,c:C.orange,sx:.00013,sy:.00019},
-      {bx:.5,by:.72,r:360,c:C.sky,sx:.00020,sy:.00010},
-      {bx:.82,by:.82,r:260,c:C.pink,sx:.00009,sy:.00016},
-    ];
-    const resize = () => { cv.width = cv.offsetWidth; cv.height = cv.offsetHeight; };
-    resize(); window.addEventListener("resize", resize);
-    const draw = () => {
-      t += 14; ctx.clearRect(0,0,cv.width,cv.height);
-      ctx.globalCompositeOperation = "lighter";
-      blobs.forEach(b => {
-        const x = (b.bx + Math.sin(t*b.sx)*.13)*cv.width;
-        const y = (b.by + Math.cos(t*b.sy)*.13)*cv.height;
-        const g = ctx.createRadialGradient(x,y,0,x,y,b.r);
-        g.addColorStop(0,b.c+"4A"); g.addColorStop(1,b.c+"00");
-        ctx.fillStyle=g; ctx.beginPath(); ctx.arc(x,y,b.r,0,7); ctx.fill();
-      });
-      raf = requestAnimationFrame(draw);
-    };
-    draw(); return () => { cancelAnimationFrame(raf); window.removeEventListener("resize",resize); };
+    const cv = ref.current; if (!cv) return; const ctx = cv.getContext("2d"); let raf, t = 0;
+    const B = [{ x: .2, y: .25, r: 380, c: C.blue, sx: .00015, sy: .00011 }, { x: .8, y: .3, r: 340, c: C.orange, sx: .00012, sy: .00018 }, { x: .5, y: .75, r: 400, c: C.cyan, sx: .00019, sy: .00009 }, { x: .85, y: .8, r: 280, c: C.purple, sx: .00008, sy: .00015 }];
+    const rs = () => { cv.width = cv.offsetWidth; cv.height = cv.offsetHeight; }; rs(); addEventListener("resize", rs);
+    const draw = () => { t += 13; ctx.clearRect(0, 0, cv.width, cv.height); ctx.globalCompositeOperation = "lighter"; B.forEach(b => { const x = (b.x + Math.sin(t * b.sx) * .14) * cv.width, y = (b.y + Math.cos(t * b.sy) * .14) * cv.height; const g = ctx.createRadialGradient(x, y, 0, x, y, b.r); g.addColorStop(0, b.c + "44"); g.addColorStop(1, b.c + "00"); ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, b.r, 0, 7); ctx.fill(); }); raf = requestAnimationFrame(draw); };
+    draw(); return () => { cancelAnimationFrame(raf); removeEventListener("resize", rs); };
   }, []);
-  return <canvas ref={ref} style={{ position:"absolute",inset:0,width:"100%",height:"100%" }} />;
+  return <canvas ref={ref} style={{ position: "absolute", inset: 0, width: "100%", height: "100%" }} />;
 }
 
-// ── Video background (uploaded clips + YouTube embeds) ───────────────────────
+/* ── video background ─────────────────────────────────────────────────────── */
 function VideoBG({ clips }) {
-  const [idx, setIdx] = useState(0);
-  const [fading, setFading] = useState(false);
-  const cur = clips[idx];
-
-  useEffect(() => {
-    if (!clips.length) return;
-    const id = setInterval(() => {
-      setFading(true);
-      setTimeout(() => { setIdx(i => (i + 1) % clips.length); setFading(false); }, 800);
-    }, 9000);
-    return () => clearInterval(id);
-  }, [clips.length]);
-
+  const [i, setI] = useState(0); const [fade, setFade] = useState(false); const cur = clips[i];
+  useEffect(() => { if (clips.length < 2) return; const id = setInterval(() => { setFade(true); setTimeout(() => { setI(p => (p + 1) % clips.length); setFade(false); }, 700); }, 10000); return () => clearInterval(id); }, [clips.length]);
   return (
-    <div style={{ position:"absolute",inset:0,overflow:"hidden",zIndex:0 }}>
+    <div style={{ position: "absolute", inset: 0, overflow: "hidden", zIndex: 0 }}>
       {!clips.length && <Mesh />}
-      {cur?.type === "upload" && (
-        <video key={cur.url} src={cur.url} autoPlay muted loop playsInline
-          style={{ position:"absolute",inset:0,width:"100%",height:"100%",objectFit:"cover",opacity:fading?0:.52,transition:"opacity .8s ease" }} />
-      )}
-      {cur?.type === "youtube" && (
-        <iframe key={cur.videoId} title="bg"
-          src={`https://www.youtube.com/embed/${cur.videoId}?autoplay=1&mute=1&controls=0&loop=1&playlist=${cur.videoId}&modestbranding=1&rel=0&showinfo=0`}
-          allow="autoplay;encrypted-media" frameBorder="0"
-          style={{ position:"absolute",top:"50%",left:"50%",width:"177.78vh",minWidth:"100%",height:"100vh",minHeight:"56.25vw",transform:"translate(-50%,-50%)",opacity:fading?0:.44,transition:"opacity .8s ease",pointerEvents:"none" }} />
-      )}
-      {/* overlay */}
-      <div style={{ position:"absolute",inset:0,background:`linear-gradient(180deg,${C.ink}d0 0%,${C.ink}88 45%,${C.ink}f2 100%)` }} />
-      <div style={{ position:"absolute",inset:0,background:`radial-gradient(ellipse 80% 55% at 50% 0%,${C.blue}1f,transparent 68%)` }} />
+      {cur?.type === "upload" && <video key={cur.url} src={cur.url} autoPlay muted loop playsInline style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", opacity: fade ? 0 : .5, transition: "opacity .7s" }} />}
+      {cur?.type === "youtube" && <iframe key={cur.videoId} title="bg" src={`https://www.youtube.com/embed/${cur.videoId}?autoplay=1&mute=1&controls=0&loop=1&playlist=${cur.videoId}&modestbranding=1&rel=0`} allow="autoplay;encrypted-media" frameBorder="0" style={{ position: "absolute", top: "50%", left: "50%", width: "177.78vh", minWidth: "100%", height: "100vh", minHeight: "56.25vw", transform: "translate(-50%,-50%)", opacity: fade ? 0 : .42, transition: "opacity .7s", pointerEvents: "none" }} />}
+      <div style={{ position: "absolute", inset: 0, background: `linear-gradient(180deg,${C.ink}d8 0%,${C.ink}80 42%,${C.ink}f5 100%)` }} />
+      <div style={{ position: "absolute", inset: 0, background: `radial-gradient(ellipse 85% 55% at 50% -5%,${C.blue}26,transparent 65%)` }} />
     </div>
   );
 }
 
-// ── Live ticker ──────────────────────────────────────────────────────────────
-function LiveTicker({ items }) {
-  const [pos, setPos] = useState(0);
-  const ref = useRef(null);
-  useEffect(() => {
-    const el = ref.current; if (!el) return;
-    let x = 0;
-    const id = setInterval(() => { x -= 1; if (Math.abs(x) > el.scrollWidth / 2) x = 0; el.style.transform = `translateX(${x}px)`; }, 20);
-    return () => clearInterval(id);
-  }, [items]);
-  const doubled = [...items, ...items];
+/* ── chips & atoms ────────────────────────────────────────────────────────── */
+function fmtN(n) { n = Number(n) || 0; return n >= 1e9 ? (n / 1e9).toFixed(1) + "B" : n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(0) + "K" : n.toLocaleString(); }
+function ago(iso) { if (!iso) return ""; const d = (Date.now() - new Date(iso)) / 864e5; if (d < 1) return "today"; if (d < 2) return "1d ago"; if (d < 30) return `${Math.floor(d)}d ago`; if (d < 60) return "1mo ago"; return `${Math.floor(d / 30)}mo ago`; }
+
+function YTBadge() { return <span style={{ display: "inline-flex", alignItems: "center", gap: 4, background: "#FF2B2B1c", color: "#FF4444", border: "1px solid #FF2B2B44", borderRadius: 5, padding: "3px 8px", fontSize: 10, fontFamily: "'Space Mono',monospace", fontWeight: 700 }}>▶ YOUTUBE</span>; }
+
+function Eye({ children, color = C.orange }) {
+  return <div style={{ display: "inline-flex", alignItems: "center", gap: 9, marginBottom: 14 }}><span style={{ width: 24, height: 2, background: `linear-gradient(90deg,${color},${C.sky})`, borderRadius: 2 }} /><span style={{ fontFamily: "'Space Mono',monospace", fontSize: 11, letterSpacing: 4, color, textTransform: "uppercase", fontWeight: 700 }}>{children}</span></div>;
+}
+function H2({ children, sub }) {
+  return <div style={{ marginBottom: 32 }}><h2 style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: "clamp(28px,4.4vw,46px)", color: C.white, margin: 0, letterSpacing: -1.4, lineHeight: 1 }}>{children}</h2>{sub && <p style={{ fontFamily: "'Outfit',sans-serif", color: C.mist, fontSize: 15, marginTop: 11, maxWidth: 580, lineHeight: 1.6 }}>{sub}</p>}</div>;
+}
+function Section({ children, bg }) { return <div style={{ background: bg || "transparent" }}><div style={{ maxWidth: 1280, margin: "0 auto", padding: "72px 24px" }}>{children}</div></div>; }
+
+/* ════════════════════════════════ HERO ════════════════════════════════════ */
+function Hero({ tab, setTab, clips, live, ticker }) {
+  const tabs = ["Charts", "Rising", "Genres", "Platforms", "Events", "Challenges", "Mixes", "Studio"];
   return (
-    <div style={{ overflow:"hidden", borderTop:`1px solid ${C.border}`, borderBottom:`1px solid ${C.border}`, padding:"9px 0", background:"rgba(0,0,0,.3)", backdropFilter:"blur(8px)" }}>
-      <div ref={ref} style={{ display:"flex", gap:0, whiteSpace:"nowrap", willChange:"transform" }}>
-        {doubled.map((item, i) => (
-          <span key={i} style={{ fontFamily:"'Space Mono',monospace", fontSize:11, color:C.mist, padding:"0 28px" }}>
-            <span style={{ color:C.orange, marginRight:8 }}>#{i % items.length + 1}</span>
-            <span style={{ color:C.white }}>{item.title}</span>
-            <span style={{ color:C.mist }}> — {item.artist}</span>
-            {item.live_views && <span style={{ color:C.green, marginLeft:10 }}>▶ {Number(item.live_views).toLocaleString()} views</span>}
-            <span style={{ color:C.border, margin:"0 12px" }}>|</span>
-          </span>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-// ── Platform chip ────────────────────────────────────────────────────────────
-function Chip({ p }) {
-  const map = { spotify:["#1DB954","Spotify"], youtube:["#FF2B2B","YouTube"], tiktok:["#27E0DC","TikTok"] };
-  const [col, label] = map[p] || ["#888", p];
-  return <span style={{ background:col+"20",color:col,border:`1px solid ${col}44`,borderRadius:5,padding:"3px 8px",fontSize:10,fontFamily:"'Space Mono',monospace",fontWeight:700,letterSpacing:.4 }}>{label}</span>;
-}
-
-function Delta({ prev, rank }) {
-  const d = (prev||rank) - rank;
-  if (d > 0) return <span style={{ color:C.green,fontSize:11,fontFamily:"'Space Mono',monospace",width:28 }}>▲{d}</span>;
-  if (d < 0) return <span style={{ color:C.pink,fontSize:11,fontFamily:"'Space Mono',monospace",width:28 }}>▼{-d}</span>;
-  return <span style={{ color:C.mist,width:28,textAlign:"center" }}>—</span>;
-}
-
-function pill(active) {
-  return { fontFamily:"'Outfit',sans-serif",fontWeight:600,fontSize:12.5,padding:"8px 17px",border:`1px solid ${active?C.orange:C.border}`,cursor:"pointer",borderRadius:9,background:active?C.orange:"rgba(255,255,255,0.04)",color:active?C.white:C.mist,transition:"all .2s" };
-}
-
-// ── HERO ─────────────────────────────────────────────────────────────────────
-function Hero({ tab, setTab, clips, liveStatus, tracks }) {
-  const tabs = ["Charts","Artists","Genres","Platforms","Events","Challenges","Mixes","Studio"];
-  return (
-    <header style={{ position:"relative",minHeight:"92vh",display:"flex",flexDirection:"column",overflow:"hidden" }}>
+    <header style={{ position: "relative", minHeight: "94vh", display: "flex", flexDirection: "column", overflow: "hidden" }}>
       <VideoBG clips={clips} />
-      <div style={{ position:"relative",zIndex:2,maxWidth:1240,width:"100%",margin:"0 auto",padding:"0 24px",flex:1,display:"flex",flexDirection:"column" }}>
-        {/* Topbar */}
-        <div style={{ display:"flex",alignItems:"center",justifyContent:"space-between",padding:"22px 0" }}>
-          <div style={{ display:"flex",alignItems:"center",gap:13 }}>
-            <div style={{ width:42,height:42,borderRadius:13,background:`linear-gradient(135deg,${C.orange},${C.blue})`,display:"grid",placeItems:"center",boxShadow:`0 8px 24px ${C.blue}55`,animation:"float 4s ease-in-out infinite" }}>
-              <span style={{ fontSize:20 }}>🎧</span>
-            </div>
-            <div>
-              <div style={{ fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:21,color:C.white,letterSpacing:-.5 }}>
-                KENYA<span style={{ background:`linear-gradient(90deg,${C.orange},${C.gold})`,WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent" }}>BEATS</span>
-              </div>
-              <div style={{ fontFamily:"'Space Mono',monospace",fontSize:9,color:C.mist,letterSpacing:3 }}>MUSIC INTELLIGENCE</div>
-            </div>
+      <div style={{ position: "relative", zIndex: 2, maxWidth: 1280, width: "100%", margin: "0 auto", padding: "0 24px", flex: 1, display: "flex", flexDirection: "column" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "22px 0" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 13 }}>
+            <div style={{ width: 44, height: 44, borderRadius: 14, background: `linear-gradient(135deg,${C.orange},${C.blue})`, display: "grid", placeItems: "center", boxShadow: `0 8px 26px ${C.blue}66`, animation: "float 4s ease-in-out infinite" }}><span style={{ fontSize: 21 }}>🎧</span></div>
+            <div><div style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: 22, color: C.white, letterSpacing: -.6 }}>KENYA<span style={{ background: `linear-gradient(90deg,${C.orange},${C.gold})`, WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>BEATS</span></div><div style={{ fontFamily: "'Space Mono',monospace", fontSize: 9, color: C.mist, letterSpacing: 3 }}>MUSIC INTELLIGENCE</div></div>
           </div>
-          <div style={{ display:"flex",alignItems:"center",gap:8,padding:"7px 14px",background:"rgba(255,255,255,.05)",borderRadius:30,border:`1px solid ${C.border}`,backdropFilter:"blur(10px)" }}>
-            <span style={{ width:8,height:8,borderRadius:"50%",background:liveStatus?C.green:"#666",boxShadow:liveStatus?`0 0 10px ${C.green}`:"none",animation:liveStatus?"pulse 1.6s infinite":"none" }} />
-            <span style={{ fontFamily:"'Space Mono',monospace",fontSize:10,color:C.white,letterSpacing:1 }}>
-              {liveStatus ? "LIVE · YOUTUBE + SUPABASE" : "CONNECTING…"}
-            </span>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 15px", background: "rgba(255,255,255,.04)", borderRadius: 30, border: `1px solid ${C.line}`, backdropFilter: "blur(12px)" }}>
+            <span style={{ width: 8, height: 8, borderRadius: "50%", background: live ? C.green : C.amber, boxShadow: live ? `0 0 10px ${C.green}` : "none", animation: live ? "pulse 1.5s infinite" : "none" }} />
+            <span style={{ fontFamily: "'Space Mono',monospace", fontSize: 10, color: C.white, letterSpacing: 1 }}>{live ? "LIVE · YOUTUBE KE CHART" : "FETCHING LIVE…"}</span>
           </div>
         </div>
 
-        {/* Main headline */}
-        <div style={{ flex:1,display:"flex",flexDirection:"column",justifyContent:"center",alignItems:"center",textAlign:"center",paddingBottom:32 }}>
-          <div style={{ fontFamily:"'Space Mono',monospace",fontSize:11,color:C.gold,letterSpacing:5,marginBottom:22,animation:"fadeUp .9s both" }}>◆ The Pulse of East Africa's Sound ◆</div>
-          <h1 style={{ fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:"clamp(48px,9.5vw,120px)",color:C.white,margin:0,lineHeight:.88,letterSpacing:-3,animation:"fadeUp .9s .1s both" }}>
-            WHERE KENYA<br />
-            <span style={{ background:`linear-gradient(100deg,${C.orange} 0%,${C.amber} 35%,${C.sky} 72%,${C.blue} 100%)`,WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent",backgroundSize:"200% auto",animation:"shimmer 6s linear infinite" }}>
-              HITS DIFFERENT
-            </span>
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "center", alignItems: "center", textAlign: "center", paddingBottom: 30 }}>
+          <div style={{ fontFamily: "'Space Mono',monospace", fontSize: 11, color: C.gold, letterSpacing: 5, marginBottom: 22, animation: "fadeUp .9s both" }}>◆ REAL-TIME · STRAIGHT FROM YOUTUBE ◆</div>
+          <h1 style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: "clamp(50px,10vw,128px)", color: C.white, margin: 0, lineHeight: .85, letterSpacing: -3.5, animation: "fadeUp .9s .1s both" }}>
+            WHAT KENYA<br /><span style={{ background: `linear-gradient(100deg,${C.orange} 0%,${C.amber} 32%,${C.cyan} 68%,${C.blue} 100%)`, WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent", backgroundSize: "220% auto", animation: "shimmer 6s linear infinite" }}>IS PLAYING NOW</span>
           </h1>
-          <p style={{ fontFamily:"'Outfit',sans-serif",color:C.mist,fontSize:"clamp(14px,2vw,18px)",marginTop:24,maxWidth:520,lineHeight:1.65,animation:"fadeUp .9s .25s both" }}>
-            Real-time rankings, AI artist intelligence and cross-platform analytics across YouTube, Spotify, TikTok & Boomplay.
-          </p>
-          <div style={{ width:"min(420px,78vw)",marginTop:36,animation:"fadeUp .9s .4s both" }}>
-            <EQ bars={38} h={52} />
-          </div>
-          <div style={{ display:"flex",flexWrap:"wrap",justifyContent:"center",gap:"14px 38px",marginTop:40,animation:"fadeUp .9s .55s both" }}>
-            {[["491M","Streams Tracked"],["2,840","Artists"],["847","Charting Tracks"],["34","Live Events"]].map(([v,l]) => (
-              <div key={l} style={{ textAlign:"center" }}>
-                <div style={{ fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:30,color:C.white,letterSpacing:-1 }}>{v}</div>
-                <div style={{ fontFamily:"'Outfit',sans-serif",fontSize:12,color:C.mist }}>{l}</div>
-              </div>
-            ))}
-          </div>
+          <p style={{ fontFamily: "'Outfit',sans-serif", color: C.mist, fontSize: "clamp(15px,2vw,19px)", marginTop: 24, maxWidth: 540, lineHeight: 1.65, animation: "fadeUp .9s .25s both" }}>The live music chart for Kenya — ranked by real YouTube views, refreshed the moment you load. No guesses, no filler.</p>
+          <div style={{ width: "min(440px,80vw)", marginTop: 36, animation: "fadeUp .9s .4s both" }}><EQ bars={42} h={50} /></div>
         </div>
       </div>
 
-      {/* Ticker */}
-      {tracks.length > 0 && <LiveTicker items={tracks} />}
+      {ticker.length > 0 && <Ticker items={ticker} />}
 
-      {/* Nav */}
-      <nav style={{ position:"sticky",bottom:0,zIndex:5,background:"rgba(5,6,13,.88)",backdropFilter:"blur(20px)",borderTop:`1px solid ${C.border}` }}>
-        <div style={{ maxWidth:1240,margin:"0 auto",padding:"0 16px",display:"flex",gap:2,overflowX:"auto",scrollbarWidth:"none" }}>
-          {tabs.map(t => (
-            <button key={t} onClick={() => setTab(t)} style={{ fontFamily:"'Outfit',sans-serif",fontWeight:600,fontSize:13.5,padding:"15px 18px",border:"none",background:"transparent",cursor:"pointer",whiteSpace:"nowrap",color:tab===t?C.white:C.mist,position:"relative",transition:"color .2s" }}>
-              {t}
-              {tab===t && <span style={{ position:"absolute",left:14,right:14,bottom:0,height:3,background:`linear-gradient(90deg,${C.orange},${C.sky})`,borderRadius:3,boxShadow:`0 0 10px ${C.orange}` }} />}
-            </button>
-          ))}
+      <nav style={{ position: "sticky", bottom: 0, zIndex: 5, background: "rgba(6,7,16,.9)", backdropFilter: "blur(24px)", borderTop: `1px solid ${C.line}` }}>
+        <div style={{ maxWidth: 1280, margin: "0 auto", padding: "0 16px", display: "flex", gap: 2, overflowX: "auto", scrollbarWidth: "none" }}>
+          {tabs.map(t => <button key={t} onClick={() => setTab(t)} style={{ fontFamily: "'Outfit',sans-serif", fontWeight: 600, fontSize: 13.5, padding: "16px 18px", border: "none", background: "transparent", cursor: "pointer", whiteSpace: "nowrap", color: tab === t ? C.white : C.mist, position: "relative", transition: "color .2s" }}>{t}{tab === t && <span style={{ position: "absolute", left: 14, right: 14, bottom: 0, height: 3, background: `linear-gradient(90deg,${C.orange},${C.cyan})`, borderRadius: 3, boxShadow: `0 0 12px ${C.orange}` }} />}</button>)}
         </div>
       </nav>
     </header>
   );
 }
 
-// ── CHARTS ───────────────────────────────────────────────────────────────────
-function Charts({ tracks, ytData }) {
-  const [period, setPeriod] = useState("Weekly");
-  const filtered = tracks.filter(t => (t.period||"weekly").toLowerCase() === period.toLowerCase());
-  const display = filtered.length ? filtered : tracks;
+function Ticker({ items }) {
+  const ref = useRef(null);
+  useEffect(() => { const el = ref.current; if (!el) return; let x = 0; const id = setInterval(() => { x -= 1; if (Math.abs(x) > el.scrollWidth / 2) x = 0; el.style.transform = `translateX(${x}px)`; }, 22); return () => clearInterval(id); }, [items]);
+  const dub = [...items, ...items];
+  return <div style={{ overflow: "hidden", borderTop: `1px solid ${C.line}`, borderBottom: `1px solid ${C.line}`, padding: "10px 0", background: "rgba(0,0,0,.35)", backdropFilter: "blur(8px)" }}><div ref={ref} style={{ display: "flex", whiteSpace: "nowrap", willChange: "transform" }}>{dub.map((t, i) => <span key={i} style={{ fontFamily: "'Space Mono',monospace", fontSize: 11.5, padding: "0 26px", display: "inline-flex", gap: 8, alignItems: "center" }}><span style={{ color: C.orange, fontWeight: 700 }}>#{(i % items.length) + 1}</span><span style={{ color: C.white }}>{t.title}</span><span style={{ color: C.dim }}>·</span><span style={{ color: C.mist }}>{t.artist}</span><span style={{ color: C.green }}>▶ {fmtN(t.views)}</span><span style={{ color: C.line, marginLeft: 10 }}>|</span></span>)}</div></div>;
+}
+
+/* ════════════════════════════════ CHARTS (redesigned) ═════════════════════ */
+function Charts({ items, loading, onRefresh, refreshing }) {
+  const [active, setActive] = useState(null);
+  if (loading) return <Section><ChartSkeleton /></Section>;
+  if (!items.length) return <Section><Empty /></Section>;
+
+  const podium = items.slice(0, 3);
+  const rest = items.slice(3, 20);
+  const totalViews = items.reduce((s, x) => s + Number(x.views || 0), 0);
 
   return (
     <Section>
-      <div style={{ display:"flex",justifyContent:"space-between",alignItems:"flex-end",flexWrap:"wrap",gap:16,marginBottom:28 }}>
-        <div>
-          <EyeLabel>Hot Charts · Live</EyeLabel>
-          <H2 sub="Ranked by real stream counts — updated live from YouTube and Supabase.">Kenya Hot 10</H2>
-        </div>
-        <div style={{ display:"flex",gap:6 }}>
-          {["Weekly","Monthly","Yearly"].map(p => <button key={p} onClick={() => setPeriod(p)} style={pill(period===p)}>{p}</button>)}
-        </div>
+      {/* header row */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap", gap: 16, marginBottom: 8 }}>
+        <div><Eye>The Live Chart · Region KE</Eye><H2 sub="Pulled live from YouTube's own most-popular music chart for Kenya. This is the real ranking, right now.">Trending Now</H2></div>
+        <button onClick={onRefresh} disabled={refreshing} className="cta" style={{ fontFamily: "'Outfit',sans-serif", fontWeight: 600, fontSize: 13, padding: "11px 20px", border: `1px solid ${C.line}`, borderRadius: 11, cursor: "pointer", background: C.glass, color: C.white, display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ display: "inline-block", animation: refreshing ? "spin 1s linear infinite" : "none" }}>⟳</span>{refreshing ? "Refreshing…" : "Refresh chart"}
+        </button>
       </div>
-      <div style={{ display:"flex",flexDirection:"column",gap:7 }}>
-        {display.map((t, i) => {
-          const yt = ytData[t.youtube_video_id] || null;
-          const streams = yt ? Number(yt.views).toLocaleString() : t.spotify_streams || t.youtube_views || "—";
-          const isYtLive = !!yt;
+
+      <div style={{ display: "flex", gap: 18, marginBottom: 34, flexWrap: "wrap" }}>
+        {[["Tracks ranked", items.length, false], ["Combined views", totalViews, true], ["Top track views", items[0]?.views || 0, true]].map(([l, n, f]) => (
+          <div key={l} style={{ flex: "1 1 160px", background: C.glass, backdropFilter: "blur(16px)", border: `1px solid ${C.line}`, borderRadius: 16, padding: "16px 20px" }}>
+            <div style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: 30, color: C.white, letterSpacing: -1 }}><CountUp to={Number(n)} fmt={f} /></div>
+            <div style={{ fontFamily: "'Outfit',sans-serif", fontSize: 12.5, color: C.mist }}>{l}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* PODIUM — top 3 as big video cards */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(260px,1fr))", gap: 18, marginBottom: 40 }}>
+        {podium.map((t, i) => {
+          const medal = ["#FFD23F", "#C9D2E8", "#E0915A"][i];
           return (
-            <Reveal key={t.id||i} delay={i*40}>
-              <div className="row" style={{ display:"flex",alignItems:"center",gap:14,padding:"14px 18px",background:C.panel,backdropFilter:"blur(14px)",borderRadius:13,border:`1px solid ${t.is_hot?C.orange+"55":C.border}`,boxShadow:t.is_hot?`0 0 26px ${C.orange}18`:"none",cursor:"pointer" }}>
-                <span style={{ width:28,textAlign:"center",fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:t.rank<=3?25:17,color:t.rank===1?C.gold:t.rank===2?"#CCD0E0":t.rank===3?"#E09B5A":C.mist }}>{t.rank}</span>
-                <Delta prev={t.prev_rank} rank={t.rank} />
-                <span style={{ width:18,fontSize:14 }}>{t.is_hot?"🔥":""}</span>
-
-                {/* Thumbnail if YouTube */}
-                {yt?.thumb && <img src={yt.thumb} alt="" style={{ width:46,height:34,borderRadius:6,objectFit:"cover",opacity:.9 }} />}
-
-                <div style={{ flex:1,minWidth:0 }}>
-                  <div style={{ fontFamily:"'Outfit',sans-serif",fontWeight:600,fontSize:14.5,color:C.white,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>
-                    {yt?.title || t.title}
-                  </div>
-                  <div style={{ fontFamily:"'Outfit',sans-serif",fontSize:12,color:C.mist,marginTop:2 }}>
-                    {yt?.channel || t.artist}
-                    {yt?.likes && <span style={{ color:C.mist,marginLeft:10 }}>♥ {Number(yt.likes).toLocaleString()}</span>}
-                  </div>
-                </div>
-
-                <span className="hideSm" style={{ fontFamily:"'Space Mono',monospace",fontSize:10,color:C.mist,background:"rgba(255,255,255,.05)",padding:"4px 9px",borderRadius:5 }}>{t.genre}</span>
-                <Chip p={t.platform} />
-
-                <div style={{ textAlign:"right",minWidth:68 }}>
-                  <div style={{ fontFamily:"'Space Mono',monospace",fontWeight:700,fontSize:13,color:isYtLive?C.green:C.sky }}>
-                    {streams}
-                  </div>
-                  <div style={{ fontFamily:"'Outfit',sans-serif",fontSize:9,color:isYtLive?C.green:C.mist,letterSpacing:.5 }}>
-                    {isYtLive?"▶ LIVE VIEWS":"streams"}
+            <Reveal key={t.videoId} d={i * 100}>
+              <div onClick={() => setActive(t)} className="podium" style={{ position: "relative", borderRadius: 22, overflow: "hidden", cursor: "pointer", border: `1px solid ${medal}55`, boxShadow: `0 18px 50px ${medal}1f`, background: C.void, aspectRatio: i === 0 ? "16/11" : "16/10" }}>
+                {t.thumb && <img src={t.thumb} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", opacity: .8 }} />}
+                <div style={{ position: "absolute", inset: 0, background: `linear-gradient(180deg,transparent 30%,${C.void}f0 100%)` }} />
+                {/* rank medal */}
+                <div style={{ position: "absolute", top: 16, left: 16, width: 46, height: 46, borderRadius: 14, background: `linear-gradient(135deg,${medal},${medal}99)`, display: "grid", placeItems: "center", fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: 22, color: C.void, boxShadow: `0 6px 20px ${medal}66` }}>{i + 1}</div>
+                <div style={{ position: "absolute", top: 18, right: 16 }}><YTBadge /></div>
+                {/* play glow */}
+                <div className="playbtn" style={{ position: "absolute", top: "42%", left: "50%", transform: "translate(-50%,-50%)", width: 58, height: 58, borderRadius: "50%", background: "rgba(255,255,255,.12)", backdropFilter: "blur(8px)", border: "1px solid rgba(255,255,255,.3)", display: "grid", placeItems: "center", fontSize: 20, color: C.white }}>▶</div>
+                <div style={{ position: "absolute", left: 18, right: 18, bottom: 16 }}>
+                  <div style={{ fontFamily: "'Syne',sans-serif", fontWeight: 700, fontSize: i === 0 ? 22 : 18, color: C.white, lineHeight: 1.1, marginBottom: 4, overflow: "hidden", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}>{t.title}</div>
+                  <div style={{ fontFamily: "'Outfit',sans-serif", fontSize: 13, color: C.mist, marginBottom: 10 }}>{t.artist}</div>
+                  <div style={{ display: "flex", gap: 14, alignItems: "center" }}>
+                    <span style={{ fontFamily: "'Space Mono',monospace", fontWeight: 700, fontSize: 15, color: C.green }}>▶ {fmtN(t.views)}</span>
+                    <span style={{ fontFamily: "'Space Mono',monospace", fontSize: 12, color: C.pink }}>♥ {fmtN(t.likes)}</span>
+                    <span style={{ fontFamily: "'Outfit',sans-serif", fontSize: 11, color: C.dim, marginLeft: "auto" }}>{ago(t.published)}</span>
                   </div>
                 </div>
               </div>
@@ -385,80 +217,93 @@ function Charts({ tracks, ytData }) {
           );
         })}
       </div>
+
+      {/* THE REST — rich list rows */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+        {rest.map((t, i) => {
+          const maxV = items[0]?.views || 1;
+          return (
+            <Reveal key={t.videoId} d={i * 30}>
+              <div onClick={() => setActive(t)} className="row" style={{ display: "flex", alignItems: "center", gap: 15, padding: "12px 16px", background: C.glass, backdropFilter: "blur(14px)", borderRadius: 14, border: `1px solid ${C.line}`, cursor: "pointer", position: "relative", overflow: "hidden" }}>
+                {/* subtle view-share fill behind row */}
+                <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: `${(t.views / maxV) * 100}%`, background: `linear-gradient(90deg,${C.blue}14,transparent)`, pointerEvents: "none" }} />
+                <span style={{ width: 26, textAlign: "center", fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: 17, color: C.mist, zIndex: 1 }}>{t.rank}</span>
+                {t.thumb && <img src={t.thumb} alt="" style={{ width: 64, height: 42, borderRadius: 8, objectFit: "cover", zIndex: 1 }} />}
+                <div style={{ flex: 1, minWidth: 0, zIndex: 1 }}>
+                  <div style={{ fontFamily: "'Outfit',sans-serif", fontWeight: 600, fontSize: 14.5, color: C.white, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.title}</div>
+                  <div style={{ fontFamily: "'Outfit',sans-serif", fontSize: 12, color: C.mist, marginTop: 2 }}>{t.artist} · <span style={{ color: C.dim }}>{ago(t.published)}</span></div>
+                </div>
+                <div className="hideSm" style={{ textAlign: "right", zIndex: 1 }}>
+                  <div style={{ fontFamily: "'Space Mono',monospace", fontSize: 12, color: C.pink }}>♥ {fmtN(t.likes)}</div>
+                </div>
+                <div style={{ textAlign: "right", minWidth: 70, zIndex: 1 }}>
+                  <div style={{ fontFamily: "'Space Mono',monospace", fontWeight: 700, fontSize: 14, color: C.green }}>{fmtN(t.views)}</div>
+                  <div style={{ fontFamily: "'Outfit',sans-serif", fontSize: 9, color: C.green, letterSpacing: .5 }}>▶ LIVE VIEWS</div>
+                </div>
+              </div>
+            </Reveal>
+          );
+        })}
+      </div>
+
+      {active && <VideoModal track={active} onClose={() => setActive(null)} />}
     </Section>
   );
 }
 
-// ── ARTISTS ──────────────────────────────────────────────────────────────────
-function Artists({ artists }) {
-  const top = artists.filter(a => !a.is_breakthrough);
-  const fresh = artists.filter(a => a.is_breakthrough);
+function VideoModal({ track, onClose }) {
+  useEffect(() => { const k = e => e.key === "Escape" && onClose(); addEventListener("keydown", k); return () => removeEventListener("keydown", k); }, [onClose]);
   return (
-    <Section>
-      <EyeLabel>Artist Intelligence · Live</EyeLabel>
-      <H2 sub="Power scores computed from streams, chart velocity and social momentum.">The Movers</H2>
-      <div style={{ display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(230px,1fr))",gap:16 }}>
-        {top.map((a,i) => (
-          <Reveal key={a.id||a.name} delay={i*55}>
-            <div className="card" style={{ background:C.panel,backdropFilter:"blur(14px)",borderRadius:18,padding:22,border:`1px solid ${C.border}`,boxShadow:i===0?`0 0 36px ${a.accent_color}28`:"none" }}>
-              <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16 }}>
-                <div style={{ width:52,height:52,borderRadius:14,background:`linear-gradient(135deg,${a.accent_color},${a.accent_color}55)`,display:"grid",placeItems:"center",fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:17,color:C.white }}>
-                  {a.name.split(" ").map(w=>w[0]).join("").slice(0,2)}
-                </div>
-                <Ring score={a.score} color={a.accent_color} />
-              </div>
-              <div style={{ fontFamily:"'Outfit',sans-serif",fontWeight:700,fontSize:16,color:C.white }}>{a.name}</div>
-              <div style={{ fontFamily:"'Outfit',sans-serif",fontSize:12.5,color:C.mist,marginBottom:12 }}>{a.genre} · {a.hits} hits</div>
-              <span style={{ fontFamily:"'Space Mono',monospace",fontSize:10,color:a.accent_color,background:a.accent_color+"1F",padding:"5px 9px",borderRadius:6 }}>{a.status}</span>
-            </div>
-          </Reveal>
-        ))}
-      </div>
-      {fresh.length > 0 && (
-        <div style={{ marginTop:44 }}>
-          <EyeLabel>Breakthrough Artists</EyeLabel>
-          <H2 sub="Fastest-rising names this cycle.">New Wave</H2>
-          <div style={{ display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))",gap:14 }}>
-            {fresh.map((a,i) => (
-              <Reveal key={a.id||a.name} delay={i*70}>
-                <div className="card" style={{ background:C.panel,backdropFilter:"blur(14px)",borderRadius:14,padding:18,border:`1px solid ${C.border}`,display:"flex",gap:14,alignItems:"center" }}>
-                  <div style={{ minWidth:46,height:46,borderRadius:12,background:`linear-gradient(135deg,${C.orange},${C.blue})`,display:"grid",placeItems:"center",fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:15,color:C.white }}>
-                    {a.name.slice(0,2).toUpperCase()}
-                  </div>
-                  <div style={{ flex:1 }}>
-                    <div style={{ fontFamily:"'Outfit',sans-serif",fontWeight:600,fontSize:14.5,color:C.white }}>{a.name}</div>
-                    <div style={{ fontFamily:"'Outfit',sans-serif",fontSize:11.5,color:C.mist,marginBottom:8 }}>{a.genre}</div>
-                    <Bar pct={a.score} color={C.orange} delay={i*80} />
-                  </div>
-                  <div style={{ fontFamily:"'Space Mono',monospace",fontWeight:700,fontSize:14,color:C.green }}>{a.growth}</div>
-                </div>
-              </Reveal>
-            ))}
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 100, background: "rgba(3,4,10,.86)", backdropFilter: "blur(10px)", display: "grid", placeItems: "center", padding: 20, animation: "fadeIn .25s" }}>
+      <div onClick={e => e.stopPropagation()} style={{ width: "min(880px,100%)", background: C.night, borderRadius: 22, overflow: "hidden", border: `1px solid ${C.line}`, boxShadow: "0 40px 100px rgba(0,0,0,.6)" }}>
+        <div style={{ position: "relative", aspectRatio: "16/9", background: "#000" }}>
+          <iframe title={track.title} src={`https://www.youtube.com/embed/${track.videoId}?autoplay=1&rel=0`} allow="autoplay;encrypted-media;fullscreen" allowFullScreen frameBorder="0" style={{ width: "100%", height: "100%", border: 0 }} />
+          <button onClick={onClose} style={{ position: "absolute", top: 12, right: 12, width: 36, height: 36, borderRadius: "50%", background: "rgba(0,0,0,.6)", color: C.white, border: "none", cursor: "pointer", fontSize: 18 }}>×</button>
+        </div>
+        <div style={{ padding: "20px 24px" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 16 }}>
+            <div><div style={{ fontFamily: "'Syne',sans-serif", fontWeight: 700, fontSize: 20, color: C.white }}>{track.title}</div><div style={{ fontFamily: "'Outfit',sans-serif", fontSize: 13.5, color: C.mist, marginTop: 3 }}>{track.artist}</div></div>
+            <YTBadge />
+          </div>
+          <div style={{ display: "flex", gap: 22, marginTop: 16 }}>
+            {[["▶ Views", fmtN(track.views), C.green], ["♥ Likes", fmtN(track.likes), C.pink], ["💬 Comments", fmtN(track.comments), C.sky], ["Uploaded", ago(track.published), C.mist]].map(([l, v, col]) => <div key={l}><div style={{ fontFamily: "'Space Mono',monospace", fontWeight: 700, fontSize: 16, color: col }}>{v}</div><div style={{ fontFamily: "'Outfit',sans-serif", fontSize: 11, color: C.dim }}>{l}</div></div>)}
           </div>
         </div>
-      )}
-    </Section>
+      </div>
+    </div>
   );
 }
 
-// ── GENRES ───────────────────────────────────────────────────────────────────
-function Genres({ genres }) {
+function ChartSkeleton() {
+  return <div><Eye>The Live Chart · Region KE</Eye><H2 sub="Contacting YouTube for Kenya's live music chart…">Loading the real ranking…</H2>
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(260px,1fr))", gap: 18, marginBottom: 30 }}>{[0, 1, 2].map(i => <div key={i} style={{ aspectRatio: "16/10", borderRadius: 22, background: C.glass, border: `1px solid ${C.line}`, animation: "shimmerBg 1.6s infinite" }} />)}</div>
+    <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>{Array(7).fill(0).map((_, i) => <div key={i} style={{ height: 66, borderRadius: 14, background: C.glass, border: `1px solid ${C.line}`, animation: "shimmerBg 1.6s infinite", animationDelay: `${i * .1}s` }} />)}</div></div>;
+}
+function Empty() {
+  return <div style={{ textAlign: "center", padding: "60px 20px" }}><div style={{ fontSize: 48, marginBottom: 16 }}>📡</div><div style={{ fontFamily: "'Syne',sans-serif", fontWeight: 700, fontSize: 22, color: C.white, marginBottom: 8 }}>No live chart yet</div><p style={{ fontFamily: "'Outfit',sans-serif", color: C.mist, maxWidth: 420, margin: "0 auto", lineHeight: 1.6 }}>The YouTube chart couldn't be reached. Confirm <code style={{ color: C.amber }}>YOUTUBE_API_KEY</code> is set in your Supabase Edge Function secrets, then refresh.</p></div>;
+}
+
+/* ════════════════════════════ RISING (from real data) ════════════════════ */
+function Rising({ items, loading }) {
+  if (loading) return <Section><H2 sub="Analysing the chart…">Rising</H2></Section>;
+  // Rising = strong views relative to very recent upload date
+  const scored = items.map(t => { const days = Math.max((Date.now() - new Date(t.published)) / 864e5, 1); return { ...t, velocity: Number(t.views) / days }; }).sort((a, b) => b.velocity - a.velocity).slice(0, 8);
+  const maxVel = scored[0]?.velocity || 1;
   return (
     <Section>
-      <EyeLabel>Genre Landscape · Live</EyeLabel>
-      <H2 sub="How Kenya's sounds split the market this period.">Sound of the Nation</H2>
-      <div style={{ display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(300px,1fr))",gap:16 }}>
-        {genres.map((g,i) => (
-          <Reveal key={g.id||g.name} delay={i*65}>
-            <div className="card" style={{ background:C.panel,backdropFilter:"blur(14px)",borderRadius:16,padding:22,border:`1px solid ${g.accent_color}44` }}>
-              <div style={{ display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:14 }}>
-                <div>
-                  <div style={{ fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:20,color:C.white }}>{g.name}</div>
-                  <div style={{ fontFamily:"'Outfit',sans-serif",fontSize:12,color:C.mist }}>{Number(g.tracks).toLocaleString()} tracks</div>
-                </div>
-                <div style={{ fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:38,color:g.accent_color,lineHeight:1 }}>{g.share}%</div>
+      <Eye color={C.cyan}>Momentum · Live</Eye>
+      <H2 sub="Ranked by view velocity — views earned per day since upload. The tracks gaining the fastest right now.">Rising Fast</H2>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(280px,1fr))", gap: 16 }}>
+        {scored.map((t, i) => (
+          <Reveal key={t.videoId} d={i * 60}>
+            <div className="card" style={{ background: C.glass, backdropFilter: "blur(16px)", borderRadius: 18, padding: 18, border: `1px solid ${C.line}`, display: "flex", gap: 14, alignItems: "center" }}>
+              {t.thumb && <img src={t.thumb} alt="" style={{ width: 68, height: 68, borderRadius: 12, objectFit: "cover" }} />}
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontFamily: "'Outfit',sans-serif", fontWeight: 600, fontSize: 14, color: C.white, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.title}</div>
+                <div style={{ fontFamily: "'Outfit',sans-serif", fontSize: 11.5, color: C.mist, marginBottom: 8 }}>{t.artist} · {ago(t.published)}</div>
+                <Bar pct={(t.velocity / maxVel) * 100} color={C.cyan} d={i * 70} />
               </div>
-              <Bar pct={(g.share/28)*100} color={g.accent_color} delay={i*80} />
+              <div style={{ textAlign: "right" }}><div style={{ fontFamily: "'Space Mono',monospace", fontWeight: 700, fontSize: 13, color: C.cyan }}>{fmtN(Math.round(t.velocity))}</div><div style={{ fontFamily: "'Outfit',sans-serif", fontSize: 9, color: C.dim }}>views/day</div></div>
             </div>
           </Reveal>
         ))}
@@ -467,31 +312,59 @@ function Genres({ genres }) {
   );
 }
 
-// ── PLATFORMS ────────────────────────────────────────────────────────────────
-function Platforms() {
+/* ════════════════════════════ GENRES (derived from chart) ═════════════════ */
+function Genres({ items, loading }) {
+  if (loading || !items.length) return <Section><H2 sub="Analysing the chart…">Genres</H2></Section>;
+  // crude but real: bucket trending tracks by keyword in title/artist
+  const buckets = { Gengetone: 0, "Afro-Pop": 0, Bongo: 0, Gospel: 0, "Hip-Hop / Drill": 0, Other: 0 };
+  const kw = { Gengetone: /gengetone|arbantone|odi/i, "Afro-Pop": /afro|love|baby|mood/i, Bongo: /bongo|tanzania|diamond|harmonize|rayvanny/i, Gospel: /gospel|yesu|mungu|bwana|praise/i, "Hip-Hop / Drill": /drill|rap|hip ?hop|wakadinali|khaligraph/i };
+  items.forEach(t => { const s = `${t.title} ${t.artist}`; let hit = false; for (const g in kw) { if (kw[g].test(s)) { buckets[g] += Number(t.views); hit = true; break; } } if (!hit) buckets.Other += Number(t.views); });
+  const total = Object.values(buckets).reduce((a, b) => a + b, 0) || 1;
+  const cols = { Gengetone: C.blue, "Afro-Pop": C.orange, Bongo: C.cyan, Gospel: C.purple, "Hip-Hop / Drill": C.amber, Other: C.dim };
+  const data = Object.entries(buckets).map(([name, v]) => ({ name, share: Math.round((v / total) * 100), color: cols[name] })).filter(d => d.share > 0).sort((a, b) => b.share - a.share);
+  const max = data[0]?.share || 1;
+  return (
+    <Section>
+      <Eye color={C.purple}>Genre Split · Live</Eye>
+      <H2 sub="Computed live from the trending chart — which sounds are pulling the most views in Kenya right now.">Sound of the Nation</H2>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(300px,1fr))", gap: 16 }}>
+        {data.map((g, i) => (
+          <Reveal key={g.name} d={i * 60}>
+            <div className="card" style={{ background: C.glass, backdropFilter: "blur(16px)", borderRadius: 16, padding: 22, border: `1px solid ${g.color}44` }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 14 }}>
+                <div style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: 19, color: C.white }}>{g.name}</div>
+                <div style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: 36, color: g.color, lineHeight: 1 }}>{g.share}%</div>
+              </div>
+              <Bar pct={(g.share / max) * 100} color={g.color} d={i * 70} />
+            </div>
+          </Reveal>
+        ))}
+      </div>
+    </Section>
+  );
+}
+
+/* ════════════════════════════ PLATFORMS ═══════════════════════════════════ */
+function Platforms({ items }) {
+  const ytTotal = items.reduce((s, x) => s + Number(x.views || 0), 0);
   const P = [
-    { platform:"YouTube Music", icon:"▶️", streams:"198M", growth:"+31%", color:"#FF2B2B", share:52 },
-    { platform:"Spotify",       icon:"🎵", streams:"142M", growth:"+24%", color:"#1DB954", share:38 },
-    { platform:"TikTok",        icon:"🎶", streams:"87M",  growth:"+67%", color:"#27E0DC", share:23 },
-    { platform:"Boomplay",      icon:"🎸", streams:"64M",  growth:"+18%", color:"#FF6B00", share:17 },
+    { name: "YouTube", icon: "▶️", val: ytTotal, sub: "live chart total views", color: "#FF2B2B", live: true },
+    { name: "Spotify", icon: "🎵", val: null, sub: "connect Spotify API to enable", color: "#1DB954", live: false },
+    { name: "TikTok", icon: "🎶", val: null, sub: "no public API — aggregator needed", color: "#22E0DC", live: false },
+    { name: "Boomplay", icon: "🎸", val: null, sub: "connect chart feed to enable", color: "#FF6B00", live: false },
   ];
   return (
     <Section>
-      <EyeLabel>Platform Intelligence</EyeLabel>
-      <H2 sub="Cross-platform reach and momentum at a glance.">Where They Listen</H2>
-      <div style={{ display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(250px,1fr))",gap:18 }}>
-        {P.map((p,i) => (
-          <Reveal key={p.platform} delay={i*70}>
-            <div className="card" style={{ background:C.panel,backdropFilter:"blur(14px)",borderRadius:18,padding:24,border:`1px solid ${p.color}33`,boxShadow:`0 8px 28px ${p.color}12` }}>
-              <div style={{ fontSize:32,marginBottom:14 }}>{p.icon}</div>
-              <div style={{ fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:18,color:C.white,marginBottom:4 }}>{p.platform}</div>
-              <div style={{ fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:36,color:p.color,letterSpacing:-1 }}>{p.streams}</div>
-              <div style={{ fontFamily:"'Outfit',sans-serif",fontSize:12,color:C.mist,marginBottom:16 }}>total streams</div>
-              <div style={{ display:"flex",justifyContent:"space-between",marginBottom:10 }}>
-                <span style={{ fontFamily:"'Space Mono',monospace",fontWeight:700,fontSize:14,color:C.green }}>{p.growth}</span>
-                <span style={{ fontFamily:"'Space Mono',monospace",fontSize:11,color:C.mist }}>{p.share}% share</span>
-              </div>
-              <Bar pct={p.share} color={p.color} delay={i*90} />
+      <Eye>Platform Coverage</Eye>
+      <H2 sub="What's wired in. We show you exactly what's live and what isn't — no fake numbers.">Where the Data Comes From</H2>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(250px,1fr))", gap: 18 }}>
+        {P.map((p, i) => (
+          <Reveal key={p.name} d={i * 60}>
+            <div className="card" style={{ background: C.glass, backdropFilter: "blur(16px)", borderRadius: 18, padding: 24, border: `1px solid ${p.live ? p.color + "55" : C.line}`, opacity: p.live ? 1 : .72, boxShadow: p.live ? `0 8px 30px ${p.color}14` : "none" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}><span style={{ fontSize: 30 }}>{p.icon}</span>{p.live ? <span style={{ fontFamily: "'Space Mono',monospace", fontSize: 9, color: C.green, background: C.green + "1c", padding: "4px 8px", borderRadius: 5, fontWeight: 700 }}>● LIVE</span> : <span style={{ fontFamily: "'Space Mono',monospace", fontSize: 9, color: C.dim, background: "rgba(255,255,255,.05)", padding: "4px 8px", borderRadius: 5 }}>OFF</span>}</div>
+              <div style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: 19, color: C.white, marginBottom: 4 }}>{p.name}</div>
+              <div style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: p.val != null ? 34 : 20, color: p.live ? p.color : C.dim, letterSpacing: -1 }}>{p.val != null ? <CountUp to={p.val} /> : "—"}</div>
+              <div style={{ fontFamily: "'Outfit',sans-serif", fontSize: 12, color: C.mist, marginTop: 6 }}>{p.sub}</div>
             </div>
           </Reveal>
         ))}
@@ -500,452 +373,198 @@ function Platforms() {
   );
 }
 
-// ── EVENTS ───────────────────────────────────────────────────────────────────
-function Events({ events }) {
-  return (
-    <Section>
-      <EyeLabel>Shows & Events · Live</EyeLabel>
-      <H2 sub="The live calendar — concerts and festivals worth the ticket.">On Stage Soon</H2>
-      <div style={{ display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(290px,1fr))",gap:18 }}>
-        {events.map((e,i) => (
-          <Reveal key={e.id||i} delay={i*70}>
-            <div className="card" style={{ background:C.panel,backdropFilter:"blur(14px)",borderRadius:18,padding:22,border:`1px solid ${C.border}`,position:"relative",overflow:"hidden" }}>
-              <div style={{ position:"absolute",top:-30,right:-30,width:120,height:120,background:`radial-gradient(circle,${C.orange}22,transparent 70%)` }} />
-              <div style={{ display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:14 }}>
-                <span style={{ fontFamily:"'Space Mono',monospace",fontSize:10,color:C.orange,background:C.orange+"1F",padding:"5px 10px",borderRadius:6,fontWeight:700 }}>{(e.event_type||"").toUpperCase()}</span>
-                <span style={{ fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:17,color:C.sky }}>{e.event_date}</span>
-              </div>
-              <div style={{ fontFamily:"'Outfit',sans-serif",fontWeight:700,fontSize:17,color:C.white,marginBottom:6 }}>{e.title}</div>
-              <div style={{ fontFamily:"'Outfit',sans-serif",fontSize:12.5,color:C.mist,marginBottom:16 }}>📍 {e.venue}</div>
-              <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center" }}>
-                <span style={{ fontFamily:"'Space Mono',monospace",fontWeight:700,fontSize:13,color:C.gold }}>{e.price}</span>
-                <button className="cta" style={{ fontFamily:"'Outfit',sans-serif",fontWeight:600,fontSize:12.5,padding:"8px 16px",background:`linear-gradient(90deg,${C.orange},${C.amber})`,color:C.white,border:"none",borderRadius:9,cursor:"pointer" }}>
-                  Get Tickets →
-                </button>
-              </div>
-            </div>
-          </Reveal>
-        ))}
-      </div>
-    </Section>
-  );
+/* ════════════════════════════ EVENTS / CHALLENGES / MIXES (Supabase) ═══════ */
+function Events({ rows }) {
+  return <Section><Eye color={C.amber}>Shows & Events</Eye><H2 sub="Concerts and festivals on the calendar. Curated in your Supabase — edit anytime.">On Stage Soon</H2>
+    {rows.length ? <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(290px,1fr))", gap: 18 }}>{rows.map((e, i) => <Reveal key={e.id || i} d={i * 60}><div className="card" style={{ background: C.glass, backdropFilter: "blur(16px)", borderRadius: 18, padding: 22, border: `1px solid ${C.line}`, position: "relative", overflow: "hidden" }}><div style={{ position: "absolute", top: -30, right: -30, width: 120, height: 120, background: `radial-gradient(circle,${C.orange}22,transparent 70%)` }} /><div style={{ display: "flex", justifyContent: "space-between", marginBottom: 14 }}><span style={{ fontFamily: "'Space Mono',monospace", fontSize: 10, color: C.orange, background: C.orange + "1c", padding: "5px 10px", borderRadius: 6, fontWeight: 700 }}>{(e.event_type || "").toUpperCase()}</span><span style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: 17, color: C.sky }}>{e.event_date}</span></div><div style={{ fontFamily: "'Outfit',sans-serif", fontWeight: 700, fontSize: 17, color: C.white, marginBottom: 6 }}>{e.title}</div><div style={{ fontFamily: "'Outfit',sans-serif", fontSize: 12.5, color: C.mist, marginBottom: 16 }}>📍 {e.venue}</div><div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}><span style={{ fontFamily: "'Space Mono',monospace", fontWeight: 700, fontSize: 13, color: C.gold }}>{e.price}</span><button className="cta" style={{ fontFamily: "'Outfit',sans-serif", fontWeight: 600, fontSize: 12.5, padding: "8px 16px", background: `linear-gradient(90deg,${C.orange},${C.amber})`, color: C.white, border: "none", borderRadius: 9, cursor: "pointer" }}>Get Tickets →</button></div></div></Reveal>)}</div> : <Empty />}
+  </Section>;
+}
+function Challenges({ rows }) {
+  return <Section><Eye color={C.pink}>Viral Challenges</Eye><H2 sub="Dance & sound challenges taking over feeds. Curated in Supabase.">Trending Challenges</H2>
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(280px,1fr))", gap: 16 }}>{rows.map((c, i) => <Reveal key={c.id || i} d={i * 60}><div className="card" style={{ background: C.glass, backdropFilter: "blur(16px)", borderRadius: 16, padding: 22, border: `1px solid ${C.line}` }}><div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}><div style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: 17, color: C.white }}>{c.name}</div><span style={{ fontSize: 18 }}>{c.platform === "TikTok" ? "🎶" : "📸"}</span></div><div style={{ fontFamily: "'Outfit',sans-serif", fontSize: 12.5, color: C.mist, marginBottom: 16 }}>by {c.creator} · {c.platform}</div><div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end" }}><div><div style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: 26, color: C.white }}>{c.videos}</div><div style={{ fontFamily: "'Outfit',sans-serif", fontSize: 11, color: C.mist }}>videos</div></div><span style={{ fontFamily: "'Space Mono',monospace", fontWeight: 700, fontSize: 16, color: C.green }}>{c.trend}</span></div></div></Reveal>)}</div>
+  </Section>;
+}
+function Mixes({ rows }) {
+  return <Section><Eye color={C.cyan}>DJ & Club Mixes</Eye><H2 sub="The sets ruling clubs and playlists. Curated in Supabase.">Trending Mixes</H2>
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(260px,1fr))", gap: 16 }}>{rows.map((m, i) => <Reveal key={m.id || i} d={i * 60}><div className="card" style={{ background: C.glass, backdropFilter: "blur(16px)", borderRadius: 16, padding: 22, border: `1px solid ${C.line}` }}><div style={{ width: 54, height: 54, borderRadius: 14, background: `linear-gradient(135deg,${C.blue},${C.orange})`, display: "grid", placeItems: "center", fontSize: 22, marginBottom: 14 }}>🎧</div><div style={{ fontFamily: "'Outfit',sans-serif", fontWeight: 700, fontSize: 15, color: C.white, marginBottom: 4 }}>{m.title}</div><div style={{ fontFamily: "'Outfit',sans-serif", fontSize: 12, color: C.mist, marginBottom: 16 }}>by {m.curator} · {m.duration}</div><div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}><span style={{ fontFamily: "'Space Mono',monospace", fontSize: 10, color: C.cyan, background: C.cyan + "1c", padding: "4px 9px", borderRadius: 5 }}>{m.genre}</span><span style={{ fontFamily: "'Space Mono',monospace", fontWeight: 700, fontSize: 13, color: C.amber }}>{m.plays} plays</span></div></div></Reveal>)}</div>
+  </Section>;
 }
 
-// ── CHALLENGES ───────────────────────────────────────────────────────────────
-function Challenges({ challenges }) {
-  return (
-    <Section>
-      <EyeLabel>Viral Challenges · Live</EyeLabel>
-      <H2 sub="The dances and sounds taking over feeds right now.">Trending Now</H2>
-      <div style={{ display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(280px,1fr))",gap:16 }}>
-        {challenges.map((c,i) => (
-          <Reveal key={c.id||i} delay={i*70}>
-            <div className="card" style={{ background:C.panel,backdropFilter:"blur(14px)",borderRadius:16,padding:22,border:`1px solid ${C.border}` }}>
-              <div style={{ display:"flex",justifyContent:"space-between",marginBottom:10 }}>
-                <div style={{ fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:17,color:C.white }}>{c.name}</div>
-                <span style={{ fontSize:18 }}>{c.platform==="TikTok"?"🎶":"📸"}</span>
-              </div>
-              <div style={{ fontFamily:"'Outfit',sans-serif",fontSize:12.5,color:C.mist,marginBottom:16 }}>by {c.creator} · {c.platform}</div>
-              <div style={{ display:"flex",justifyContent:"space-between",alignItems:"flex-end" }}>
-                <div>
-                  <div style={{ fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:28,color:C.white }}>{c.videos}</div>
-                  <div style={{ fontFamily:"'Outfit',sans-serif",fontSize:11,color:C.mist }}>videos</div>
-                </div>
-                <span style={{ fontFamily:"'Space Mono',monospace",fontWeight:700,fontSize:16,color:C.green }}>{c.trend}</span>
-              </div>
-            </div>
-          </Reveal>
-        ))}
-      </div>
-    </Section>
-  );
-}
-
-// ── MIXES ────────────────────────────────────────────────────────────────────
-function Mixes({ mixes }) {
-  return (
-    <Section>
-      <EyeLabel>DJ & Club Mixes · Live</EyeLabel>
-      <H2 sub="The sets ruling clubs and playlists across the country.">Trending Mixes</H2>
-      <div style={{ display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))",gap:16 }}>
-        {mixes.map((m,i) => (
-          <Reveal key={m.id||i} delay={i*70}>
-            <div className="card" style={{ background:C.panel,backdropFilter:"blur(14px)",borderRadius:16,padding:22,border:`1px solid ${C.border}` }}>
-              <div style={{ width:54,height:54,borderRadius:14,background:`linear-gradient(135deg,${C.blue},${C.orange})`,display:"grid",placeItems:"center",fontSize:22,marginBottom:14 }}>🎧</div>
-              <div style={{ fontFamily:"'Outfit',sans-serif",fontWeight:700,fontSize:15,color:C.white,marginBottom:4 }}>{m.title}</div>
-              <div style={{ fontFamily:"'Outfit',sans-serif",fontSize:12,color:C.mist,marginBottom:16 }}>by {m.curator} · {m.duration}</div>
-              <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center" }}>
-                <span style={{ fontFamily:"'Space Mono',monospace",fontSize:10,color:C.sky,background:C.sky+"1F",padding:"4px 9px",borderRadius:5 }}>{m.genre}</span>
-                <span style={{ fontFamily:"'Space Mono',monospace",fontWeight:700,fontSize:13,color:C.amber }}>{m.plays} plays</span>
-              </div>
-            </div>
-          </Reveal>
-        ))}
-      </div>
-    </Section>
-  );
-}
-
-// ── STUDIO ───────────────────────────────────────────────────────────────────
-function Studio({ clips, setClips, liveYt, setLiveYt }) {
-  const [msg, setMsg] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [ytInput, setYtInput] = useState("");
-  const [ytSearch, setYtSearch] = useState("");
-  const [ytResults, setYtResults] = useState([]);
-  const [searching, setSearching] = useState(false);
+/* ════════════════════════════ STUDIO (persistent bg) ═════════════════════ */
+function Studio({ clips, setClips, reloadClips }) {
+  const [msg, setMsg] = useState(""); const [busy, setBusy] = useState(false);
+  const [link, setLink] = useState(""); const [q, setQ] = useState(""); const [res, setRes] = useState([]); const [searching, setSearching] = useState(false);
   const fileRef = useRef(null);
 
-  const upload = async e => {
-    const f = e.target.files?.[0]; if (!f) return;
-    setBusy(true); setMsg("Uploading to Supabase Storage…");
-    try {
-      const url = await sbUpload(f);
-      setClips(c => [...c, { type:"upload", url, label:f.name }]);
-      setMsg("✓ Clip added to background rotation.");
-    } catch (err) { setMsg("Upload failed: " + err.message); }
-    setBusy(false);
+  const onUpload = async e => {
+    const f = e.target.files?.[0]; if (!f) return; setBusy(true); setMsg("Uploading to Supabase Storage…");
+    try { await uploadClip(f); await reloadClips(); setMsg("✓ Saved. This clip now persists across refreshes."); }
+    catch (err) { setMsg("Upload failed: " + err.message); } setBusy(false);
   };
-
-  const addYT = () => {
-    const id = extractYTId(ytInput);
-    if (!id) { setMsg("Couldn't parse that YouTube link."); return; }
-    setClips(c => [...c, { type:"youtube", videoId:id, label:ytInput }]);
-    setYtInput(""); setMsg("✓ YouTube video added to background rotation.");
+  const addLink = async () => {
+    const id = ytId(link); if (!id) { setMsg("Couldn't read that YouTube link."); return; }
+    await sbIns("bg_clips", { label: link, youtube_video_id: id, source: "youtube", active: true });
+    await reloadClips(); setLink(""); setMsg("✓ Saved. This video now persists across refreshes.");
   };
-
-  const searchYT = async () => {
-    if (!ytSearch.trim()) return;
-    setSearching(true); setYtResults([]);
-    try {
-      const items = await ytSearch(ytSearch + " Kenya", 6);
-      setYtResults(items);
-    } catch { setMsg("YouTube search failed — check Edge Function secret."); }
-    setSearching(false);
+  const search = async () => {
+    if (!q.trim()) return; setSearching(true); setRes([]);
+    try { setRes(await ytSearchFn(q + " Kenya", 6)); } catch { setMsg("Search failed — check Edge Function secret."); } setSearching(false);
   };
-
-  const addFromSearch = item => {
-    if (!item.videoId) return;
-    setClips(c => [...c, { type:"youtube", videoId:item.videoId, label:item.title||item.videoId }]);
-    setMsg(`✓ "${item.title}" added to background.`);
-  };
+  const addRes = async r => { if (!r.videoId) return; await sbIns("bg_clips", { label: r.title || r.videoId, youtube_video_id: r.videoId, source: "youtube", active: true }); await reloadClips(); setMsg(`✓ "${r.title}" saved to background.`); };
+  const remove = async c => { await sbDel("bg_clips", `id=eq.${c.id}`); await reloadClips(); setMsg("Removed."); };
 
   return (
     <Section>
-      <EyeLabel>Studio</EyeLabel>
-      <H2 sub="Manage the homepage video background — upload clips or add YouTube music videos.">Background Studio</H2>
-      <div style={{ display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(310px,1fr))",gap:18,marginBottom:28 }}>
-        {/* Upload */}
-        <div className="card" style={{ background:C.panel,backdropFilter:"blur(14px)",borderRadius:18,padding:26,border:`1px solid ${C.border}` }}>
-          <div style={{ fontSize:30,marginBottom:12 }}>📤</div>
-          <div style={{ fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:18,color:C.white,marginBottom:6 }}>Upload a clip</div>
-          <p style={{ fontFamily:"'Outfit',sans-serif",fontSize:13,color:C.mist,marginBottom:18,lineHeight:1.5 }}>MP4 or WebM — stored in Supabase Storage, looped behind the hero.</p>
-          <input ref={fileRef} type="file" accept="video/mp4,video/webm" onChange={upload} style={{ display:"none" }} />
-          <button onClick={() => fileRef.current?.click()} disabled={busy} style={{ fontFamily:"'Outfit',sans-serif",fontWeight:600,fontSize:14,padding:"12px 22px",background:`linear-gradient(90deg,${C.orange},${C.amber})`,color:C.white,border:"none",borderRadius:11,cursor:"pointer",width:"100%" }}>
-            {busy ? "Uploading…" : "Choose video"}
-          </button>
-        </div>
-
-        {/* YouTube paste */}
-        <div className="card" style={{ background:C.panel,backdropFilter:"blur(14px)",borderRadius:18,padding:26,border:`1px solid ${C.border}` }}>
-          <div style={{ fontSize:30,marginBottom:12 }}>▶️</div>
-          <div style={{ fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:18,color:C.white,marginBottom:6 }}>Paste a YouTube link</div>
-          <p style={{ fontFamily:"'Outfit',sans-serif",fontSize:13,color:C.mist,marginBottom:18,lineHeight:1.5 }}>Any YouTube music video — plays muted and looped in the background.</p>
-          <input value={ytInput} onChange={e => setYtInput(e.target.value)} placeholder="youtube.com/watch?v=…"
-            style={{ width:"100%",padding:"11px 14px",borderRadius:10,border:`1px solid ${C.border}`,background:"rgba(255,255,255,.04)",color:C.white,fontFamily:"'Outfit',sans-serif",fontSize:14,marginBottom:12,outline:"none" }} />
-          <button onClick={addYT} style={{ fontFamily:"'Outfit',sans-serif",fontWeight:600,fontSize:14,padding:"12px 22px",background:`linear-gradient(90deg,${C.blue},${C.sky})`,color:C.white,border:"none",borderRadius:11,cursor:"pointer",width:"100%" }}>Add to background</button>
-        </div>
-
-        {/* YouTube search */}
-        <div className="card" style={{ background:C.panel,backdropFilter:"blur(14px)",borderRadius:18,padding:26,border:`1px solid ${C.border}` }}>
-          <div style={{ fontSize:30,marginBottom:12 }}>🔍</div>
-          <div style={{ fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:18,color:C.white,marginBottom:6 }}>Search YouTube</div>
-          <p style={{ fontFamily:"'Outfit',sans-serif",fontSize:13,color:C.mist,marginBottom:18,lineHeight:1.5 }}>Search Kenyan music directly and pick a video to add to the background.</p>
-          <input value={ytSearch} onChange={e => setYtSearch(e.target.value)} onKeyDown={e => e.key==="Enter" && searchYT()} placeholder="e.g. Sauti Sol, Khaligraph…"
-            style={{ width:"100%",padding:"11px 14px",borderRadius:10,border:`1px solid ${C.border}`,background:"rgba(255,255,255,.04)",color:C.white,fontFamily:"'Outfit',sans-serif",fontSize:14,marginBottom:12,outline:"none" }} />
-          <button onClick={searchYT} disabled={searching} style={{ fontFamily:"'Outfit',sans-serif",fontWeight:600,fontSize:14,padding:"12px 22px",background:`linear-gradient(90deg,${C.pink},${C.orange})`,color:C.white,border:"none",borderRadius:11,cursor:"pointer",width:"100%" }}>
-            {searching ? "Searching…" : "Search"}
-          </button>
-        </div>
+      <Eye>Studio</Eye>
+      <H2 sub="Drive the homepage background. Everything you add is saved to Supabase and sticks until you remove it — refresh-proof.">Background Studio</H2>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(310px,1fr))", gap: 18, marginBottom: 26 }}>
+        <StudioCard icon="📤" title="Upload a clip" body="MP4 or WebM. Stored in Supabase, looped behind the hero.">
+          <input ref={fileRef} type="file" accept="video/mp4,video/webm" onChange={onUpload} style={{ display: "none" }} />
+          <button onClick={() => fileRef.current?.click()} disabled={busy} style={btn(`linear-gradient(90deg,${C.orange},${C.amber})`)}>{busy ? "Uploading…" : "Choose video"}</button>
+        </StudioCard>
+        <StudioCard icon="▶️" title="Paste a YouTube link" body="Any music video — plays muted & looped in the background.">
+          <input value={link} onChange={e => setLink(e.target.value)} placeholder="youtube.com/watch?v=…" style={inp} />
+          <button onClick={addLink} style={btn(`linear-gradient(90deg,${C.blue},${C.sky})`)}>Save to background</button>
+        </StudioCard>
+        <StudioCard icon="🔍" title="Search YouTube" body="Find Kenyan music and pick a video to set as background.">
+          <input value={q} onChange={e => setQ(e.target.value)} onKeyDown={e => e.key === "Enter" && search()} placeholder="e.g. Sauti Sol, Bien…" style={inp} />
+          <button onClick={search} disabled={searching} style={btn(`linear-gradient(90deg,${C.pink},${C.orange})`)}>{searching ? "Searching…" : "Search"}</button>
+        </StudioCard>
       </div>
 
-      {/* YouTube search results */}
-      {ytResults.length > 0 && (
-        <div style={{ marginBottom:28 }}>
-          <div style={{ fontFamily:"'Outfit',sans-serif",fontWeight:600,fontSize:14,color:C.white,marginBottom:12 }}>Search results — click to add to background</div>
-          <div style={{ display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(220px,1fr))",gap:12 }}>
-            {ytResults.map((r,i) => (
-              <div key={i} onClick={() => addFromSearch(r)} style={{ background:C.panel,borderRadius:12,overflow:"hidden",cursor:"pointer",border:`1px solid ${C.border}`,transition:"transform .2s" }}
-                onMouseEnter={e => e.currentTarget.style.transform="translateY(-3px)"}
-                onMouseLeave={e => e.currentTarget.style.transform="none"}>
-                {r.thumb && <img src={r.thumb} alt="" style={{ width:"100%",height:110,objectFit:"cover" }} />}
-                <div style={{ padding:"10px 12px" }}>
-                  <div style={{ fontFamily:"'Outfit',sans-serif",fontWeight:600,fontSize:12,color:C.white,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>{r.title}</div>
-                  <div style={{ fontFamily:"'Space Mono',monospace",fontSize:10,color:C.green,marginTop:4 }}>{r.views ? Number(r.views).toLocaleString()+" views" : ""}</div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
+      {res.length > 0 && <div style={{ marginBottom: 26 }}>
+        <div style={{ fontFamily: "'Outfit',sans-serif", fontWeight: 600, fontSize: 14, color: C.white, marginBottom: 12 }}>Tap a result to set as background</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(210px,1fr))", gap: 12 }}>{res.map((r, i) => <div key={i} onClick={() => addRes(r)} className="card" style={{ background: C.glass, borderRadius: 12, overflow: "hidden", cursor: "pointer", border: `1px solid ${C.line}` }}>{r.thumb && <img src={r.thumb} alt="" style={{ width: "100%", height: 110, objectFit: "cover" }} />}<div style={{ padding: "10px 12px" }}><div style={{ fontFamily: "'Outfit',sans-serif", fontWeight: 600, fontSize: 12, color: C.white, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.title}</div><div style={{ fontFamily: "'Space Mono',monospace", fontSize: 10, color: C.green, marginTop: 4 }}>{r.views ? fmtN(r.views) + " views" : ""}</div></div></div>)}</div>
+      </div>}
 
-      {msg && <div style={{ marginBottom:18,fontFamily:"'Space Mono',monospace",fontSize:12.5,color:msg.startsWith("✓")?C.green:C.amber }}>{msg}</div>}
+      {msg && <div style={{ marginBottom: 18, fontFamily: "'Space Mono',monospace", fontSize: 12.5, color: msg.startsWith("✓") ? C.green : C.amber }}>{msg}</div>}
 
-      {/* Current rotation */}
-      {clips.length > 0 && (
-        <div>
-          <div style={{ fontFamily:"'Outfit',sans-serif",fontWeight:600,fontSize:14,color:C.white,marginBottom:12 }}>In rotation ({clips.length})</div>
-          <div style={{ display:"flex",flexWrap:"wrap",gap:10 }}>
-            {clips.map((c,i) => (
-              <div key={i} style={{ display:"flex",alignItems:"center",gap:8,padding:"8px 12px",background:"rgba(255,255,255,.05)",borderRadius:10,border:`1px solid ${C.border}` }}>
-                <span>{c.type==="youtube"?"▶️":"🎬"}</span>
-                <span style={{ fontFamily:"'Outfit',sans-serif",fontSize:12,color:C.mist,maxWidth:160,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap" }}>{c.label}</span>
-                <button onClick={() => setClips(cl => cl.filter((_,j) => j!==i))} style={{ background:"none",border:"none",color:C.pink,cursor:"pointer",fontSize:15,lineHeight:1 }}>×</button>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
+      {clips.length > 0 && <div><div style={{ fontFamily: "'Outfit',sans-serif", fontWeight: 600, fontSize: 14, color: C.white, marginBottom: 12 }}>Saved backgrounds — persist across refreshes ({clips.length})</div><div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>{clips.map((c, i) => <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", background: "rgba(255,255,255,.05)", borderRadius: 10, border: `1px solid ${C.line}` }}><span>{c.type === "youtube" ? "▶️" : "🎬"}</span><span style={{ fontFamily: "'Outfit',sans-serif", fontSize: 12, color: C.mist, maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.label}</span><button onClick={() => remove(c)} style={{ background: "none", border: "none", color: C.pink, cursor: "pointer", fontSize: 15 }}>×</button></div>)}</div></div>}
     </Section>
   );
 }
+const inp = { width: "100%", padding: "11px 14px", borderRadius: 10, border: `1px solid ${C.line}`, background: "rgba(255,255,255,.04)", color: C.white, fontFamily: "'Outfit',sans-serif", fontSize: 14, marginBottom: 12, outline: "none" };
+const btn = bg => ({ fontFamily: "'Outfit',sans-serif", fontWeight: 600, fontSize: 14, padding: "12px 22px", background: bg, color: C.white, border: "none", borderRadius: 11, cursor: "pointer", width: "100%" });
+function StudioCard({ icon, title, body, children }) {
+  return <div className="card" style={{ background: C.glass, backdropFilter: "blur(16px)", borderRadius: 18, padding: 26, border: `1px solid ${C.line}` }}><div style={{ fontSize: 30, marginBottom: 12 }}>{icon}</div><div style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: 18, color: C.white, marginBottom: 6 }}>{title}</div><p style={{ fontFamily: "'Outfit',sans-serif", fontSize: 13, color: C.mist, marginBottom: 18, lineHeight: 1.5 }}>{body}</p>{children}</div>;
+}
+function ytId(s) { if (!s) return null; const m = s.match(/(?:youtube\.com\/(?:watch\?v=|embed\/|shorts\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/); if (m) return m[1]; if (/^[A-Za-z0-9_-]{11}$/.test(s.trim())) return s.trim(); return null; }
 
-// ── AI ANALYST ───────────────────────────────────────────────────────────────
-function AIAnalyst({ tracks }) {
-  const [loading, setLoading] = useState(false);
-  const [out, setOut] = useState("");
-  const [topic, setTopic] = useState("this week's biggest movers and what's driving them");
-  const topics = [
-    "this week's biggest movers and what's driving them",
-    "Gengetone vs Afro-Pop market battle right now",
-    "Kenya's breakout artists — who to watch next",
-    "how YouTube and TikTok are reshaping Kenyan music",
-  ];
-
+/* ════════════════════════════ AI ANALYST ═════════════════════════════════ */
+function AIAnalyst({ items }) {
+  const [loading, setLoading] = useState(false); const [out, setOut] = useState("");
+  const [topic, setTopic] = useState("what's driving the top of the chart right now");
+  const topics = ["what's driving the top of the chart right now", "which rising track will break next", "the genre winning Kenya this week", "what these numbers say about the scene"];
   const run = async () => {
     setLoading(true); setOut("");
-    const top5 = tracks.slice(0,5).map(t => `${t.rank}. "${t.title}" — ${t.artist} (${t.genre}, ${t.live_views ? Number(t.live_views).toLocaleString()+" YT views" : t.spotify_streams || ""})`).join("; ");
+    const top = items.slice(0, 8).map(t => `${t.rank}. "${t.title}" — ${t.artist} (${fmtN(t.views)} views, uploaded ${ago(t.published)})`).join("; ");
     try {
-      const r = await fetch("https://api.anthropic.com/v1/messages", {
-        method:"POST",
-        headers:{ "Content-Type":"application/json" },
-        body: JSON.stringify({
-          model:"claude-sonnet-4-6", max_tokens:1000,
-          system:"You are KenyaBeats AI, a sharp music-industry analyst specialising in Kenyan and East African music (Gengetone, Afro-Pop, Bongo Flava, Afro-Soul, Kenyan Hip-Hop/Drill). Write 3 punchy, confident analyst paragraphs using real artist names and specific observations. Under 230 words. No preamble or sign-off.",
-          messages:[{ role:"user", content:`Live Hot 5 right now: ${top5}. Analyse: ${topic}. Include trend insight, cross-platform read, and one bold prediction.` }],
-        }),
-      });
-      const d = await r.json();
-      setOut(d.content?.find(b => b.type==="text")?.text || "No response.");
-    } catch { setOut("Analysis unavailable — check connection."); }
-    setLoading(false);
+      const r = await fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 1000, system: "You are KenyaBeats AI, a sharp music-industry analyst for Kenyan & East African music (Gengetone, Afro-Pop, Bongo, Gospel, Kenyan Hip-Hop/Drill). You are given the REAL live YouTube chart for Kenya. Write 3 punchy, specific analyst paragraphs grounded in the actual data given. Reference real titles/artists from the data. Under 230 words. No preamble.", messages: [{ role: "user", content: `Live YouTube Kenya chart right now: ${top}. Analyse: ${topic}. Give a data-grounded read and one bold prediction.` }] }) });
+      const d = await r.json(); setOut(d.content?.find(b => b.type === "text")?.text || "No response.");
+    } catch { setOut("Analysis unavailable — check connection."); } setLoading(false);
   };
-
   return (
-    <div style={{ position:"relative",background:`linear-gradient(160deg,${C.night},#0c0f24)`,borderTop:`1px solid ${C.border}`,padding:"60px 24px",overflow:"hidden" }}>
-      <div style={{ position:"absolute",top:-60,right:"8%",width:340,height:340,background:`radial-gradient(circle,${C.blue}1e,transparent 70%)` }} />
-      <div style={{ maxWidth:860,margin:"0 auto",position:"relative" }}>
-        <div style={{ display:"flex",alignItems:"center",gap:13,marginBottom:20 }}>
-          <div style={{ width:44,height:44,borderRadius:12,background:`linear-gradient(135deg,${C.blue},${C.orange})`,display:"grid",placeItems:"center",fontSize:20,animation:"float 4s ease-in-out infinite" }}>🤖</div>
-          <div>
-            <div style={{ fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:22,color:C.white }}>KenyaBeats <span style={{ color:C.sky }}>AI Analyst</span></div>
-            <div style={{ fontFamily:"'Space Mono',monospace",fontSize:9,color:C.mist,letterSpacing:2 }}>READS LIVE CHART DATA · POWERED BY CLAUDE</div>
-          </div>
-        </div>
-        <div style={{ display:"flex",flexWrap:"wrap",gap:8,marginBottom:18 }}>
-          {topics.map(t => (
-            <button key={t} onClick={() => setTopic(t)} style={{ fontFamily:"'Outfit',sans-serif",fontSize:12.5,padding:"8px 15px",borderRadius:10,cursor:"pointer",border:`1px solid ${topic===t?C.sky:C.border}`,background:topic===t?C.blue+"33":"rgba(255,255,255,.04)",color:topic===t?C.white:C.mist,transition:"all .2s" }}>{t}</button>
-          ))}
-        </div>
-        <button onClick={run} disabled={loading} style={{ fontFamily:"'Outfit',sans-serif",fontWeight:700,fontSize:15,padding:"13px 30px",background:loading?"rgba(255,255,255,.06)":`linear-gradient(90deg,${C.orange},${C.amber})`,color:C.white,border:"none",borderRadius:12,cursor:loading?"wait":"pointer",marginBottom:22,transition:"all .2s" }}>
-          {loading ? "◌  Analysing the live charts…" : "✦  Generate AI Brief"}
-        </button>
-        {out && (
-          <Reveal>
-            <div style={{ background:C.panel,backdropFilter:"blur(14px)",borderRadius:16,padding:26,border:`1px solid ${C.sky}33`,borderLeft:`3px solid ${C.sky}` }}>
-              <div style={{ fontFamily:"'Outfit',sans-serif",fontSize:14.5,color:"#E8ECFF",lineHeight:1.82,whiteSpace:"pre-wrap" }}>{out}</div>
-            </div>
-          </Reveal>
-        )}
+    <div style={{ position: "relative", background: `linear-gradient(165deg,${C.night},#0b0e22)`, borderTop: `1px solid ${C.line}`, padding: "64px 24px", overflow: "hidden" }}>
+      <div style={{ position: "absolute", top: -80, right: "6%", width: 360, height: 360, background: `radial-gradient(circle,${C.blue}1c,transparent 70%)` }} />
+      <div style={{ position: "absolute", bottom: -100, left: "4%", width: 320, height: 320, background: `radial-gradient(circle,${C.orange}14,transparent 70%)` }} />
+      <div style={{ maxWidth: 880, margin: "0 auto", position: "relative" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 13, marginBottom: 20 }}><div style={{ width: 46, height: 46, borderRadius: 13, background: `linear-gradient(135deg,${C.blue},${C.orange})`, display: "grid", placeItems: "center", fontSize: 21, animation: "float 4s ease-in-out infinite" }}>🤖</div><div><div style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: 23, color: C.white }}>KenyaBeats <span style={{ color: C.sky }}>AI Analyst</span></div><div style={{ fontFamily: "'Space Mono',monospace", fontSize: 9, color: C.mist, letterSpacing: 2 }}>READS THE LIVE CHART · POWERED BY CLAUDE</div></div></div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 18 }}>{topics.map(t => <button key={t} onClick={() => setTopic(t)} style={{ fontFamily: "'Outfit',sans-serif", fontSize: 12.5, padding: "8px 15px", borderRadius: 10, cursor: "pointer", border: `1px solid ${topic === t ? C.sky : C.line}`, background: topic === t ? C.blue + "2c" : "rgba(255,255,255,.04)", color: topic === t ? C.white : C.mist, transition: "all .2s" }}>{t}</button>)}</div>
+        <button onClick={run} disabled={loading} style={{ fontFamily: "'Outfit',sans-serif", fontWeight: 700, fontSize: 15, padding: "14px 32px", background: loading ? "rgba(255,255,255,.06)" : `linear-gradient(90deg,${C.orange},${C.amber})`, color: C.white, border: "none", borderRadius: 12, cursor: loading ? "wait" : "pointer", marginBottom: 22 }}>{loading ? "◌  Reading the live chart…" : "✦  Generate AI Brief"}</button>
+        {out && <Reveal><div style={{ background: C.glass, backdropFilter: "blur(16px)", borderRadius: 16, padding: 26, border: `1px solid ${C.sky}33`, borderLeft: `3px solid ${C.sky}` }}><div style={{ fontFamily: "'Outfit',sans-serif", fontSize: 14.5, color: "#E8ECFF", lineHeight: 1.85, whiteSpace: "pre-wrap" }}>{out}</div></div></Reveal>}
       </div>
     </div>
   );
 }
 
-// ── Shared layout atoms ───────────────────────────────────────────────────────
-function Section({ children }) {
-  return <div style={{ maxWidth:1240,margin:"0 auto",padding:"64px 24px" }}>{children}</div>;
-}
-function EyeLabel({ children }) {
-  return (
-    <div style={{ display:"inline-flex",alignItems:"center",gap:9,marginBottom:14 }}>
-      <span style={{ width:22,height:2,background:`linear-gradient(90deg,${C.orange},${C.sky})`,borderRadius:2 }} />
-      <span style={{ fontFamily:"'Space Mono',monospace",fontSize:11,letterSpacing:4,color:C.orange,textTransform:"uppercase",fontWeight:700 }}>{children}</span>
-    </div>
-  );
-}
-function H2({ children, sub }) {
-  return (
-    <div style={{ marginBottom:30 }}>
-      <h2 style={{ fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:"clamp(26px,4vw,42px)",color:C.white,margin:0,letterSpacing:-1,lineHeight:1.02 }}>{children}</h2>
-      {sub && <p style={{ fontFamily:"'Outfit',sans-serif",color:C.mist,fontSize:14.5,marginTop:10,maxWidth:560,lineHeight:1.6 }}>{sub}</p>}
-    </div>
-  );
-}
-
-function extractYTId(s) {
-  if (!s) return null;
-  const m = s.match(/(?:youtube\.com\/(?:watch\?v=|embed\/|shorts\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/);
-  if (m) return m[1];
-  if (/^[A-Za-z0-9_-]{11}$/.test(s.trim())) return s.trim();
-  return null;
-}
-
-// ── ROOT APP ─────────────────────────────────────────────────────────────────
+/* ════════════════════════════════ ROOT ═══════════════════════════════════ */
 export default function App() {
   const [tab, setTab] = useState("Charts");
   const [clips, setClips] = useState([]);
-  const [tracks, setTracks]       = useState([]);
-  const [artists, setArtists]     = useState([]);
-  const [genres, setGenres]       = useState([]);
-  const [events, setEvents]       = useState([]);
-  const [challenges, setChallenges] = useState([]);
-  const [mixes, setMixes]         = useState([]);
-  const [ytData, setYtData]       = useState({});
-  const [liveStatus, setLiveStatus] = useState(false);
-  const [liveYt, setLiveYt]       = useState(false);
+  const [chart, setChart] = useState([]);
+  const [chartLoading, setChartLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [live, setLive] = useState(false);
+  const [events, setEvents] = useState([]); const [challenges, setChallenges] = useState([]); const [mixes, setMixes] = useState([]);
 
-  // 1. Load all tables from Supabase
-  useEffect(() => {
-    Promise.all([
-      sbGet("tracks",     "&order=rank.asc"),
-      sbGet("artists",    "&order=score.desc"),
-      sbGet("genres",     "&order=share.desc"),
-      sbGet("events"),
-      sbGet("challenges"),
-      sbGet("mixes"),
-    ]).then(([t, a, g, e, c, m]) => {
-      setTracks(t);
-      setArtists(a);
-      setGenres(g);
-      setEvents(e);
-      setChallenges(c);
-      setMixes(m);
-      setLiveStatus(true);
-    }).catch(err => console.error("Supabase load error:", err));
+  // Load persisted backgrounds from Supabase
+  const reloadClips = useCallback(async () => {
+    const rows = await sbGet("bg_clips", "&active=eq.true&order=created_at.asc");
+    setClips(rows.map(r => r.source === "youtube" ? { id: r.id, type: "youtube", videoId: r.youtube_video_id, label: r.label } : { id: r.id, type: "upload", url: `${SB}/storage/v1/object/public/bg-clips/${r.storage_path}`, label: r.label }));
   }, []);
 
-  // 2. Once tracks load, fetch live YouTube view counts for any that have a video_id,
-  //    AND searches YouTube RIGHT NOW for what is actually trending in Kenya (no hardcoded year)
-  useEffect(() => {
-    if (!tracks.length) return;
-
-    (async () => {
-      try {
-        // A — tracks that already have youtube_video_id in Supabase
-        const pinned = tracks.filter(t => t.youtube_video_id).map(t => t.youtube_video_id);
-
-        // B — search YouTube live for top Kenyan tracks and merge by position
-        // Run 3 parallel searches for what is actually trending RIGHT NOW in Kenya
-        const [trending, gengetone, afropop] = await Promise.all([
-          ytSearch("Kenya music trending", 5),
-          ytSearch("Gengetone trending", 3),
-          ytSearch("Kenya Afropop new", 3),
-        ]);
-        const searched = [...trending, ...gengetone, ...afropop].filter((v,i,a) => a.findIndex(x=>x.videoId===v.videoId)===i).slice(0,10);
-
-        // Merge: update tracks with live YouTube data
-        const merged = { ...ytData };
-        searched.forEach(item => { if (item.videoId) merged[item.videoId] = item; });
-
-        // If pinned IDs exist, fetch their stats too
-        if (pinned.length) {
-          const pinnedStats = await ytStats(pinned);
-          Object.assign(merged, pinnedStats);
-        }
-
-        setYtData(merged);
-        setLiveYt(true);
-
-        // 3. Enrich tracks in Supabase: assign youtube_video_id if missing
-        //    (zip by rank position so rank 1 gets the top YouTube result)
-        const updates = tracks
-          .filter(t => !t.youtube_video_id)
-          .map((t, i) => searched[i] ? { id: t.id, youtube_video_id: searched[i].videoId, youtube_views: Number(searched[i].views||0) } : null)
-          .filter(Boolean);
-
-        // Fire-and-forget PATCH updates to Supabase
-        updates.forEach(u => {
-          fetch(`${SUPABASE_URL}/rest/v1/tracks?id=eq.${u.id}`, {
-            method: "PATCH",
-            headers: { ...HEADERS, "Content-Type":"application/json", Prefer:"return=minimal" },
-            body: JSON.stringify({ youtube_video_id: u.youtube_video_id, youtube_views: u.youtube_views, last_synced: new Date().toISOString() }),
-          }).catch(() => {});
-        });
-
-        // Refresh tracks from Supabase to get updated video IDs
-        const refreshed = await sbGet("tracks", "&order=rank.asc");
-        setTracks(refreshed);
-      } catch (err) {
-        console.error("YouTube live sync error:", err);
+  // Load the live chart: try cache first (instant), then refresh from YouTube
+  const loadChart = useCallback(async (force = false) => {
+    // 1. cache for instant paint
+    if (!force) {
+      const cached = await sbGet("trending_now", "&order=rank.asc");
+      if (cached.length) { setChart(cached.map(c => ({ ...c, videoId: c.video_id }))); setChartLoading(false); setLive(true); }
+    }
+    // 2. live fetch
+    try {
+      const fresh = await ytTrending(20);
+      if (fresh.length) {
+        setChart(fresh); setLive(true);
+        // write snapshot to cache
+        await sbDel("trending_now", "rank=gt.0");
+        await sbIns("trending_now", fresh.map(f => ({ rank: f.rank, video_id: f.videoId, title: f.title, artist: f.artist, views: f.views, likes: f.likes, comments: f.comments, thumb: f.thumb, published: f.published })));
       }
-    })();
-  }, [tracks.length]);
+    } catch (e) { console.error("trending:", e); }
+    setChartLoading(false);
+  }, []);
 
-  // 4. Annotate tracks with live YouTube view data for display
-  const enrichedTracks = tracks.map((t, i) => {
-    const yt = ytData[t.youtube_video_id];
-    return yt ? { ...t, live_views: yt.views, live_thumb: yt.thumb, live_channel: yt.channel, live_title: yt.title } : t;
-  });
+  useEffect(() => {
+    reloadClips();
+    loadChart();
+    sbGet("events").then(setEvents);
+    sbGet("challenges").then(setChallenges);
+    sbGet("mixes").then(setMixes);
+  }, [reloadClips, loadChart]);
+
+  const refresh = async () => { setRefreshing(true); await loadChart(true); setRefreshing(false); };
 
   const sections = {
-    Charts:     <Charts tracks={enrichedTracks} ytData={ytData} />,
-    Artists:    <Artists artists={artists} />,
-    Genres:     <Genres genres={genres} />,
-    Platforms:  <Platforms />,
-    Events:     <Events events={events} />,
-    Challenges: <Challenges challenges={challenges} />,
-    Mixes:      <Mixes mixes={mixes} />,
-    Studio:     <Studio clips={clips} setClips={setClips} liveYt={liveYt} setLiveYt={setLiveYt} />,
+    Charts: <Charts items={chart} loading={chartLoading} onRefresh={refresh} refreshing={refreshing} />,
+    Rising: <Rising items={chart} loading={chartLoading} />,
+    Genres: <Genres items={chart} loading={chartLoading} />,
+    Platforms: <Platforms items={chart} />,
+    Events: <Events rows={events} />,
+    Challenges: <Challenges rows={challenges} />,
+    Mixes: <Mixes rows={mixes} />,
+    Studio: <Studio clips={clips} setClips={setClips} reloadClips={reloadClips} />,
   };
 
   return (
-    <div style={{ minHeight:"100vh", background:C.ink, color:C.white }}>
+    <div style={{ minHeight: "100vh", background: C.ink, color: C.white }}>
       <style>{`
         ${FONTS}
         *{box-sizing:border-box;margin:0;padding:0}
         body{background:${C.ink};overflow-x:hidden}
-        ::-webkit-scrollbar{width:4px;height:4px}
-        ::-webkit-scrollbar-thumb{background:${C.border};border-radius:2px}
-        ::-webkit-scrollbar-track{background:${C.ink}}
-        @keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.35;transform:scale(1.35)}}
+        ::-webkit-scrollbar{width:4px;height:4px}::-webkit-scrollbar-thumb{background:${C.line};border-radius:2px}::-webkit-scrollbar-track{background:${C.ink}}
+        @keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.35;transform:scale(1.4)}}
         @keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-7px)}}
         @keyframes fadeUp{from{opacity:0;transform:translateY(28px)}to{opacity:1;transform:none}}
-        @keyframes shimmer{to{background-position:200% center}}
-        .card{transition:transform .25s cubic-bezier(.2,.8,.2,1),box-shadow .25s}
+        @keyframes fadeIn{from{opacity:0}to{opacity:1}}
+        @keyframes shimmer{to{background-position:220% center}}
+        @keyframes spin{to{transform:rotate(360deg)}}
+        @keyframes shimmerBg{0%,100%{opacity:.4}50%{opacity:.7}}
+        .card{transition:transform .25s cubic-bezier(.2,.8,.2,1),box-shadow .25s,border-color .25s}
         .card:hover{transform:translateY(-4px)}
-        .row{transition:transform .2s}
-        .row:hover{transform:translateX(5px)}
-        .cta:hover{filter:brightness(1.1)}
-        @media(max-width:560px){.hideSm{display:none!important}}
-        input::placeholder{color:${C.mist}77}
-        input:focus{border-color:${C.blue}!important}
+        .row{transition:transform .2s,border-color .2s}
+        .row:hover{transform:translateX(5px);border-color:${C.blue}55!important}
+        .podium{transition:transform .3s cubic-bezier(.2,.8,.2,1),box-shadow .3s}
+        .podium:hover{transform:translateY(-6px) scale(1.01)}
+        .podium:hover .playbtn{background:${C.orange};border-color:${C.orange};box-shadow:0 0 30px ${C.orange}}
+        .cta:hover{filter:brightness(1.12)}
+        @media(max-width:600px){.hideSm{display:none!important}}
+        input::placeholder{color:${C.mist}66}input:focus{border-color:${C.blue}!important}
       `}</style>
 
-      <Hero tab={tab} setTab={setTab} clips={clips} liveStatus={liveStatus} tracks={enrichedTracks} />
-
-      <main style={{ background:C.ink }}>
-        <div key={tab} style={{ animation:"fadeUp .45s both" }}>
-          {sections[tab]}
-        </div>
-      </main>
-
-      <AIAnalyst tracks={enrichedTracks} />
-
-      <footer style={{ background:C.ink,borderTop:`1px solid ${C.border}`,padding:"26px 24px",textAlign:"center" }}>
-        <div style={{ fontFamily:"'Space Mono',monospace",fontSize:10,color:C.mist,letterSpacing:2 }}>
-          KENYABEATS MUSIC INTELLIGENCE · {liveStatus && liveYt ? "✦ LIVE — SUPABASE + YOUTUBE DATA API" : liveStatus ? "✦ SUPABASE LIVE · YOUTUBE SYNCING…" : "CONNECTING…"} · © 2025
-        </div>
+      <Hero tab={tab} setTab={setTab} clips={clips} live={live} ticker={chart.slice(0, 12)} />
+      <main style={{ background: C.ink }}><div key={tab} style={{ animation: "fadeUp .45s both" }}>{sections[tab]}</div></main>
+      <AIAnalyst items={chart} />
+      <footer style={{ background: C.void, borderTop: `1px solid ${C.line}`, padding: "30px 24px", textAlign: "center" }}>
+        <div style={{ fontFamily: "'Space Mono',monospace", fontSize: 10, color: C.mist, letterSpacing: 2 }}>KENYABEATS · {live ? "✦ LIVE — YOUTUBE KENYA MUSIC CHART (REGION KE)" : "CONNECTING…"} · © 2026</div>
       </footer>
     </div>
   );
