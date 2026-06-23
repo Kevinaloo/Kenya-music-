@@ -9,6 +9,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 const SB = "https://uinxdkpnxwyrecnxjhdm.supabase.co";
 const ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVpbnhka3BueHd5cmVjbnhqaGRtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIxNTU4MTEsImV4cCI6MjA5NzczMTgxMX0.icGL80eUNTJkZNvX39GpfJbhKmAh9xFqpsoBKSHHDUE";
 const FN = `${SB}/functions/v1/youtube-sync`;
+const BUILDER = `${SB}/functions/v1/chart-builder`;
 const H = { apikey: ANON, Authorization: `Bearer ${ANON}` };
 
 /* ── data helpers ─────────────────────────────────────────────────────────── */
@@ -16,14 +17,14 @@ const sbGet = async (t, qs = "") => { const r = await fetch(`${SB}/rest/v1/${t}?
 const sbDel = (t, qs) => fetch(`${SB}/rest/v1/${t}?${qs}`, { method: "DELETE", headers: H });
 const sbIns = (t, body) => fetch(`${SB}/rest/v1/${t}`, { method: "POST", headers: { ...H, "Content-Type": "application/json", Prefer: "return=minimal" }, body: JSON.stringify(body) });
 
-async function ytSmart(max = 40) {
-  const r = await fetch(`${FN}?action=smart&region=KE&max=${max}`);
+async function readChart() {
+  const r = await fetch(`${BUILDER}?action=read`);
   const d = await r.json();
   if (d.error) throw new Error(d.error);
-  return d; // { songs, mixes, tribal, aiEngine, scanned, matched }
+  return d; // { songs, mixes, tribal, meta }
 }
 async function ytSearchFn(q, max = 8) {
-  const r = await fetch(`${FN}?action=search&q=${encodeURIComponent(q)}&max=${max}`);
+  const r = await fetch(`${BUILDER}?action=search&q=${encodeURIComponent(q)}&max=${max}`);
   const d = await r.json();
   return d.items || [];
 }
@@ -167,18 +168,24 @@ function Charts({ items, loading, onRefresh, refreshing, aiEngine, scanInfo }) {
   if (!items.length) return <Section><Empty /></Section>;
 
   const podium = items.slice(0, 3);
-  const rest = items.slice(3, 20);
+  const rest = items.slice(3, 100);
   const totalViews = items.reduce((s, x) => s + Number(x.views || 0), 0);
 
   return (
     <Section>
       {/* header row */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap", gap: 16, marginBottom: 8 }}>
-        <div><Eye>AI-Filtered · Kenyan + Collabs Only</Eye><H2 sub="YouTube gives us Kenya's trending feed — then our AI sifts out everything that isn't Kenyan or a Kenyan collab. The real local chart, nothing foreign.">Trending Now</H2>
-          {aiEngine && <div style={{ display: "inline-flex", alignItems: "center", gap: 8, marginTop: -16, marginBottom: 4 }}>
+        <div><Eye>AI-Ranked · Kenyan + Collabs</Eye><H2 sub="A true trending chart — built from hundreds of candidates, scored by view velocity, engagement and freshness, then filtered to Kenyan music only. Rebuilt every 2 hours.">The Hot 100</H2>
+          {aiEngine && <div style={{ display: "flex", gap: 8, marginTop: -16, marginBottom: 4, flexWrap: "wrap" }}>
             <span style={{ fontFamily: "'Space Mono',monospace", fontSize: 10, color: C.cyan, background: C.cyan + "14", border: `1px solid ${C.cyan}33`, padding: "4px 10px", borderRadius: 6 }}>
-              ✦ AI: {aiEngine === "gemini" ? "Gemini" : aiEngine === "groq" ? "Groq" : "Database"} · scanned {scanInfo?.scanned || 0} → {scanInfo?.matched || 0} Kenyan
+              ✦ {scanInfo?.scanned || 0} scanned → {scanInfo?.matched || 0} Kenyan
             </span>
+            <span style={{ fontFamily: "'Space Mono',monospace", fontSize: 10, color: C.amber, background: C.amber + "14", border: `1px solid ${C.amber}33`, padding: "4px 10px", borderRadius: 6 }}>
+              ◆ {(scanInfo?.sources || "youtube").replace(/\+/g, " + ")}
+            </span>
+            {scanInfo?.lastBuild && <span style={{ fontFamily: "'Space Mono',monospace", fontSize: 10, color: C.green, background: C.green + "14", border: `1px solid ${C.green}33`, padding: "4px 10px", borderRadius: 6 }}>
+              ● updated {ago(scanInfo.lastBuild)}
+            </span>}
           </div>}
         </div>
         <button onClick={onRefresh} disabled={refreshing} className="cta" style={{ fontFamily: "'Outfit',sans-serif", fontWeight: 600, fontSize: 13, padding: "11px 20px", border: `1px solid ${C.line}`, borderRadius: 11, cursor: "pointer", background: C.glass, color: C.white, display: "flex", alignItems: "center", gap: 8 }}>
@@ -581,25 +588,18 @@ export default function App() {
     setClips(rows.map(r => r.source === "youtube" ? { id: r.id, type: "youtube", videoId: r.youtube_video_id, label: r.label } : { id: r.id, type: "upload", url: `${SB}/storage/v1/object/public/bg-clips/${r.storage_path}`, label: r.label }));
   }, []);
 
-  // Load the SMART live chart: cache for instant paint, then AI-filtered live fetch
-  const loadChart = useCallback(async (force = false) => {
-    // 1. cache for instant paint (already-classified Kenyan songs)
-    if (!force) {
-      const cached = await sbGet("trending_now", "&order=rank.asc");
-      if (cached.length) { setChart(cached.map(c => ({ ...c, videoId: c.video_id }))); setChartLoading(false); setLive(true); }
-    }
-    // 2. live smart fetch: trending -> DB match -> Gemini/Groq classify -> Kenyan only
+  // Read the PRE-COMPUTED chart (built every 2h by the cron). Instant + always full.
+  const loadChart = useCallback(async () => {
     try {
-      const d = await ytSmart(40);
+      const d = await readChart();
       if (d.songs) {
         setChart(d.songs); setDjMixes(d.mixes || []); setTribal(d.tribal || []);
-        setAiEngine(d.aiEngine || "db"); setScanInfo({ scanned: d.scanned, matched: d.matched });
+        const m = d.meta || {};
+        setAiEngine(m.ai_engine || "db");
+        setScanInfo({ scanned: m.candidates_scanned || 0, matched: (m.songs_count || 0) + (m.mixes_count || 0) + (m.tribal_count || 0), sources: m.sources || "youtube", lastBuild: m.last_build });
         setLive(true);
-        // cache the clean Kenyan song snapshot
-        await sbDel("trending_now", "rank=gt.0");
-        if (d.songs.length) await sbIns("trending_now", d.songs.slice(0, 20).map(f => ({ rank: f.rank, video_id: f.videoId, title: f.title, artist: f.artist, views: f.views, likes: f.likes, comments: f.comments, thumb: f.thumb, published: f.published })));
       }
-    } catch (e) { console.error("smart chart:", e); }
+    } catch (e) { console.error("read chart:", e); }
     setChartLoading(false);
   }, []);
 
@@ -608,9 +608,12 @@ export default function App() {
     loadChart();
     sbGet("events").then(setEvents);
     sbGet("challenges").then(setChallenges);
+    // refresh the chart view every 5 min in case the cron rebuilt it
+    const poll = setInterval(loadChart, 5 * 60 * 1000);
+    return () => clearInterval(poll);
   }, [reloadClips, loadChart]);
 
-  const refresh = async () => { setRefreshing(true); await loadChart(true); setRefreshing(false); };
+  const refresh = async () => { setRefreshing(true); await loadChart(); setRefreshing(false); };
 
   const sections = {
     Charts: <Charts items={chart} loading={chartLoading} onRefresh={refresh} refreshing={refreshing} aiEngine={aiEngine} scanInfo={scanInfo} />,
