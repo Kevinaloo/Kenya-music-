@@ -116,6 +116,104 @@ function H2({ children, sub }) {
 function Section({ children, bg }) { return <div style={{ background: bg || "transparent" }}><div style={{ maxWidth: 1280, margin: "0 auto", padding: "72px 24px" }}>{children}</div></div>; }
 
 /* ════════════════════════════════ HERO ════════════════════════════════════ */
+/* ════════════════════════════ CINEMATIC INTRO ════════════════════════════ */
+function Intro({ top3, onDone }) {
+  // phases: 0 = "TRENDING NOW" kinetic title, 1/2/3 = each song reveal, 4 = dissolve out
+  const [phase, setPhase] = useState(0);
+  const [out, setOut] = useState(false);
+  const skip = () => { setOut(true); setTimeout(onDone, 700); };
+
+  useEffect(() => {
+    // wait until chart data exists; if it never comes within 4s, skip to homepage
+    if (!top3 || top3.length === 0) {
+      const t = setTimeout(() => { if (!top3 || top3.length === 0) skip(); }, 4000);
+      return () => clearTimeout(t);
+    }
+    const timeline = [
+      [0, 2600],          // TRENDING NOW title  (2.6s)
+      [1, 5200],          // #1 song            (5.2s)
+      [2, 5200],          // #2 song
+      [3, 5200],          // #3 song
+    ];
+    let acc = 0; const timers = [];
+    timeline.forEach(([p, dur]) => { timers.push(setTimeout(() => setPhase(p), acc)); acc += dur; });
+    timers.push(setTimeout(() => setOut(true), acc));
+    timers.push(setTimeout(onDone, acc + 700));
+    return () => timers.forEach(clearTimeout);
+  }, [top3 && top3.length]);
+
+  const cur = phase >= 1 && phase <= 3 ? top3[phase - 1] : null;
+
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 1000, background: C.void, overflow: "hidden", opacity: out ? 0 : 1, transition: "opacity .7s ease", pointerEvents: out ? "none" : "auto" }}>
+      {/* animated mesh always behind */}
+      <Mesh />
+      <div style={{ position: "absolute", inset: 0, background: `radial-gradient(ellipse 70% 60% at 50% 50%, transparent, ${C.void} 80%)` }} />
+
+      {/* PHASE 0 — kinetic TRENDING NOW */}
+      {phase === 0 && (
+        <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", textAlign: "center" }}>
+          <div>
+            <div style={{ overflow: "hidden", marginBottom: 6 }}>
+              <div style={{ fontFamily: "'Space Mono',monospace", fontSize: "clamp(11px,2vw,15px)", letterSpacing: 8, color: C.gold, animation: "introLine .8s .1s both" }}>K E N Y A B E A T S</div>
+            </div>
+            <h1 style={{ margin: 0, lineHeight: .9 }}>
+              <span style={{ display: "block", overflow: "hidden" }}><span style={{ display: "inline-block", fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: "clamp(56px,15vw,200px)", color: C.white, letterSpacing: -4, animation: "introWord 1s .25s both" }}>TRENDING</span></span>
+              <span style={{ display: "block", overflow: "hidden" }}><span style={{ display: "inline-block", fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: "clamp(56px,15vw,200px)", letterSpacing: -4, background: `linear-gradient(100deg,${C.orange},${C.amber},${C.cyan})`, WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent", backgroundSize: "200% auto", animation: "introWord 1s .45s both, shimmer 3s linear infinite" }}>NOW</span></span>
+            </h1>
+            <div style={{ marginTop: 26, display: "flex", justifyContent: "center" }}><div style={{ width: 240, maxWidth: "60vw", animation: "introLine .8s .8s both" }}><EQ bars={28} h={34} /></div></div>
+            <div style={{ marginTop: 18, fontFamily: "'Outfit',sans-serif", fontSize: 14, color: C.mist, animation: "introLine .8s 1s both" }}>Kenya's live top 3, right now</div>
+          </div>
+        </div>
+      )}
+
+      {/* PHASE 1-3 — song reveal with playing video */}
+      {cur && (
+        <div key={phase} style={{ position: "absolute", inset: 0 }}>
+          {/* background video for this track */}
+          <iframe title={cur.title} src={`https://www.youtube.com/embed/${cur.videoId}?autoplay=1&mute=1&controls=0&start=20&modestbranding=1&rel=0&playsinline=1`} allow="autoplay;encrypted-media" frameBorder="0"
+            style={{ position: "absolute", top: "50%", left: "50%", width: "177.78vh", minWidth: "100%", height: "100vh", minHeight: "56.25vw", transform: "translate(-50%,-50%)", opacity: .55, border: 0, pointerEvents: "none", animation: "introVidIn 1s both" }} />
+          <div style={{ position: "absolute", inset: 0, background: `linear-gradient(180deg,${C.void}aa,${C.void}55 40%,${C.void}f0)` }} />
+
+          {/* giant rank numeral sweeping in */}
+          <div style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)", fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: "min(78vh,780px)", color: "rgba(255,255,255,0.06)", lineHeight: 1, animation: "introRank 1.1s both", pointerEvents: "none" }}>{cur.rank}</div>
+
+          {/* content */}
+          <div style={{ position: "absolute", left: 0, right: 0, bottom: "12%", padding: "0 7vw" }}>
+            <div style={{ overflow: "hidden", marginBottom: 14 }}>
+              <div style={{ display: "inline-flex", alignItems: "center", gap: 14, animation: "introUp .7s .15s both" }}>
+                <span style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: "clamp(40px,8vw,90px)", lineHeight: 1, color: phase === 1 ? C.gold : phase === 2 ? "#D6DAEA" : "#E0915A" }}>#{cur.rank}</span>
+                <span style={{ fontFamily: "'Space Mono',monospace", fontSize: "clamp(10px,1.4vw,13px)", letterSpacing: 3, color: C.green, background: C.green + "18", border: `1px solid ${C.green}44`, padding: "6px 12px", borderRadius: 8 }}>▶ {fmtN(cur.views)} VIEWS</span>
+                {cur.origin_verified && <span style={{ fontFamily: "'Space Mono',monospace", fontSize: "clamp(9px,1.3vw,12px)", letterSpacing: 2, color: C.sky, background: C.sky + "14", border: `1px solid ${C.sky}33`, padding: "6px 11px", borderRadius: 8 }}>✓ VERIFIED KENYAN</span>}
+              </div>
+            </div>
+            <div style={{ overflow: "hidden" }}>
+              <h2 style={{ margin: 0, fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: "clamp(34px,7vw,92px)", color: C.white, letterSpacing: -2, lineHeight: .98, animation: "introUp .8s .3s both", maxWidth: "92%" }}>{cur.title}</h2>
+            </div>
+            <div style={{ overflow: "hidden", marginTop: 10 }}>
+              <div style={{ fontFamily: "'Outfit',sans-serif", fontWeight: 500, fontSize: "clamp(16px,2.4vw,26px)", color: C.mist, animation: "introUp .8s .45s both" }}>{cur.artist} · <span style={{ color: C.amber, textTransform: "capitalize" }}>{cur.genre}</span></div>
+            </div>
+            {/* progress dots */}
+            <div style={{ display: "flex", gap: 8, marginTop: 30, animation: "introUp .8s .6s both" }}>
+              {[1, 2, 3].map(n => <div key={n} style={{ height: 4, width: n === phase ? 44 : 22, borderRadius: 3, background: n === phase ? `linear-gradient(90deg,${C.orange},${C.cyan})` : "rgba(255,255,255,.18)", transition: "all .4s" }} />)}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* skip */}
+      <button onClick={skip} style={{ position: "absolute", top: 24, right: 24, zIndex: 5, fontFamily: "'Outfit',sans-serif", fontWeight: 600, fontSize: 13, padding: "9px 18px", background: "rgba(255,255,255,.08)", color: C.white, border: `1px solid ${C.line}`, borderRadius: 30, cursor: "pointer", backdropFilter: "blur(10px)", display: "flex", alignItems: "center", gap: 7 }}>
+        Skip intro <span style={{ fontSize: 15 }}>→</span>
+      </button>
+
+      {/* bottom brand bar */}
+      <div style={{ position: "absolute", bottom: 22, left: 0, right: 0, textAlign: "center", fontFamily: "'Space Mono',monospace", fontSize: 10, color: C.dim, letterSpacing: 3, animation: "introLine 1s .4s both" }}>
+        LIVE FROM YOUTUBE · REGION KE · AI-RANKED
+      </div>
+    </div>
+  );
+}
+
 function Hero({ tab, setTab, clips, live, ticker }) {
   const tabs = ["Charts", "Rising", "Tribal", "Genres", "DJ Mixes", "Events", "Challenges", "Studio"];
   return (
@@ -571,6 +669,7 @@ function AIAnalyst({ items }) {
 /* ════════════════════════════════ ROOT ═══════════════════════════════════ */
 export default function App() {
   const [tab, setTab] = useState("Charts");
+  const [showIntro, setShowIntro] = useState(true);
   const [clips, setClips] = useState([]);
   const [chart, setChart] = useState([]);          // Kenyan + collab songs
   const [djMixes, setDjMixes] = useState([]);      // Kenyan DJ mixes
@@ -640,6 +739,11 @@ export default function App() {
         @keyframes shimmer{to{background-position:220% center}}
         @keyframes spin{to{transform:rotate(360deg)}}
         @keyframes shimmerBg{0%,100%{opacity:.4}50%{opacity:.7}}
+        @keyframes introWord{from{opacity:0;transform:translateY(110%) skewY(6deg)}to{opacity:1;transform:none}}
+        @keyframes introLine{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:none}}
+        @keyframes introUp{from{opacity:0;transform:translateY(120%)}to{opacity:1;transform:none}}
+        @keyframes introRank{from{opacity:0;transform:translate(-50%,-50%) scale(1.6)}to{opacity:1;transform:translate(-50%,-50%) scale(1)}}
+        @keyframes introVidIn{from{opacity:0;transform:translate(-50%,-50%) scale(1.12)}to{opacity:.55;transform:translate(-50%,-50%) scale(1)}}
         .card{transition:transform .25s cubic-bezier(.2,.8,.2,1),box-shadow .25s,border-color .25s}
         .card:hover{transform:translateY(-4px)}
         .row{transition:transform .2s,border-color .2s}
@@ -652,6 +756,7 @@ export default function App() {
         input::placeholder{color:${C.mist}66}input:focus{border-color:${C.blue}!important}
       `}</style>
 
+      {showIntro && <Intro top3={chart.slice(0, 3)} onDone={() => setShowIntro(false)} />}
       <Hero tab={tab} setTab={setTab} clips={clips} live={live} ticker={chart.slice(0, 12)} />
       <main style={{ background: C.ink }}><div key={tab} style={{ animation: "fadeUp .45s both" }}>{sections[tab]}</div></main>
       <AIAnalyst items={chart} />
