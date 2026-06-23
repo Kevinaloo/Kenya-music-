@@ -16,11 +16,11 @@ const sbGet = async (t, qs = "") => { const r = await fetch(`${SB}/rest/v1/${t}?
 const sbDel = (t, qs) => fetch(`${SB}/rest/v1/${t}?${qs}`, { method: "DELETE", headers: H });
 const sbIns = (t, body) => fetch(`${SB}/rest/v1/${t}`, { method: "POST", headers: { ...H, "Content-Type": "application/json", Prefer: "return=minimal" }, body: JSON.stringify(body) });
 
-async function ytTrending(max = 20) {
-  const r = await fetch(`${FN}?action=trending&region=KE&max=${max}`);
+async function ytSmart(max = 40) {
+  const r = await fetch(`${FN}?action=smart&region=KE&max=${max}`);
   const d = await r.json();
   if (d.error) throw new Error(d.error);
-  return d.items || [];
+  return d; // { songs, mixes, tribal, aiEngine, scanned, matched }
 }
 async function ytSearchFn(q, max = 8) {
   const r = await fetch(`${FN}?action=search&q=${encodeURIComponent(q)}&max=${max}`);
@@ -116,7 +116,7 @@ function Section({ children, bg }) { return <div style={{ background: bg || "tra
 
 /* ════════════════════════════════ HERO ════════════════════════════════════ */
 function Hero({ tab, setTab, clips, live, ticker }) {
-  const tabs = ["Charts", "Rising", "Genres", "Platforms", "Events", "Challenges", "Mixes", "Studio"];
+  const tabs = ["Charts", "Rising", "Tribal", "Genres", "DJ Mixes", "Events", "Challenges", "Studio"];
   return (
     <header style={{ position: "relative", minHeight: "94vh", display: "flex", flexDirection: "column", overflow: "hidden" }}>
       <VideoBG clips={clips} />
@@ -161,7 +161,7 @@ function Ticker({ items }) {
 }
 
 /* ════════════════════════════════ CHARTS (redesigned) ═════════════════════ */
-function Charts({ items, loading, onRefresh, refreshing }) {
+function Charts({ items, loading, onRefresh, refreshing, aiEngine, scanInfo }) {
   const [active, setActive] = useState(null);
   if (loading) return <Section><ChartSkeleton /></Section>;
   if (!items.length) return <Section><Empty /></Section>;
@@ -174,7 +174,13 @@ function Charts({ items, loading, onRefresh, refreshing }) {
     <Section>
       {/* header row */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap", gap: 16, marginBottom: 8 }}>
-        <div><Eye>The Live Chart · Region KE</Eye><H2 sub="Pulled live from YouTube's own most-popular music chart for Kenya. This is the real ranking, right now.">Trending Now</H2></div>
+        <div><Eye>AI-Filtered · Kenyan + Collabs Only</Eye><H2 sub="YouTube gives us Kenya's trending feed — then our AI sifts out everything that isn't Kenyan or a Kenyan collab. The real local chart, nothing foreign.">Trending Now</H2>
+          {aiEngine && <div style={{ display: "inline-flex", alignItems: "center", gap: 8, marginTop: -16, marginBottom: 4 }}>
+            <span style={{ fontFamily: "'Space Mono',monospace", fontSize: 10, color: C.cyan, background: C.cyan + "14", border: `1px solid ${C.cyan}33`, padding: "4px 10px", borderRadius: 6 }}>
+              ✦ AI: {aiEngine === "gemini" ? "Gemini" : aiEngine === "groq" ? "Groq" : "Database"} · scanned {scanInfo?.scanned || 0} → {scanInfo?.matched || 0} Kenyan
+            </span>
+          </div>}
+        </div>
         <button onClick={onRefresh} disabled={refreshing} className="cta" style={{ fontFamily: "'Outfit',sans-serif", fontWeight: 600, fontSize: 13, padding: "11px 20px", border: `1px solid ${C.line}`, borderRadius: 11, cursor: "pointer", background: C.glass, color: C.white, display: "flex", alignItems: "center", gap: 8 }}>
           <span style={{ display: "inline-block", animation: refreshing ? "spin 1s linear infinite" : "none" }}>⟳</span>{refreshing ? "Refreshing…" : "Refresh chart"}
         </button>
@@ -384,10 +390,88 @@ function Challenges({ rows }) {
     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(280px,1fr))", gap: 16 }}>{rows.map((c, i) => <Reveal key={c.id || i} d={i * 60}><div className="card" style={{ background: C.glass, backdropFilter: "blur(16px)", borderRadius: 16, padding: 22, border: `1px solid ${C.line}` }}><div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}><div style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: 17, color: C.white }}>{c.name}</div><span style={{ fontSize: 18 }}>{c.platform === "TikTok" ? "🎶" : "📸"}</span></div><div style={{ fontFamily: "'Outfit',sans-serif", fontSize: 12.5, color: C.mist, marginBottom: 16 }}>by {c.creator} · {c.platform}</div><div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end" }}><div><div style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: 26, color: C.white }}>{c.videos}</div><div style={{ fontFamily: "'Outfit',sans-serif", fontSize: 11, color: C.mist }}>videos</div></div><span style={{ fontFamily: "'Space Mono',monospace", fontWeight: 700, fontSize: 16, color: C.green }}>{c.trend}</span></div></div></Reveal>)}</div>
   </Section>;
 }
-function Mixes({ rows }) {
-  return <Section><Eye color={C.cyan}>DJ & Club Mixes</Eye><H2 sub="The sets ruling clubs and playlists. Curated in Supabase.">Trending Mixes</H2>
-    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(260px,1fr))", gap: 16 }}>{rows.map((m, i) => <Reveal key={m.id || i} d={i * 60}><div className="card" style={{ background: C.glass, backdropFilter: "blur(16px)", borderRadius: 16, padding: 22, border: `1px solid ${C.line}` }}><div style={{ width: 54, height: 54, borderRadius: 14, background: `linear-gradient(135deg,${C.blue},${C.orange})`, display: "grid", placeItems: "center", fontSize: 22, marginBottom: 14 }}>🎧</div><div style={{ fontFamily: "'Outfit',sans-serif", fontWeight: 700, fontSize: 15, color: C.white, marginBottom: 4 }}>{m.title}</div><div style={{ fontFamily: "'Outfit',sans-serif", fontSize: 12, color: C.mist, marginBottom: 16 }}>by {m.curator} · {m.duration}</div><div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}><span style={{ fontFamily: "'Space Mono',monospace", fontSize: 10, color: C.cyan, background: C.cyan + "1c", padding: "4px 9px", borderRadius: 5 }}>{m.genre}</span><span style={{ fontFamily: "'Space Mono',monospace", fontWeight: 700, fontSize: 13, color: C.amber }}>{m.plays} plays</span></div></div></Reveal>)}</div>
-  </Section>;
+function DJMixes({ items, loading }) {
+  const [active, setActive] = useState(null);
+  if (loading) return <Section><H2 sub="Analysing the chart…">DJ Mixes</H2></Section>;
+  return (
+    <Section>
+      <Eye color={C.cyan}>DJ Sets · AI-Detected</Eye>
+      <H2 sub="Our AI tells DJ mixes apart from regular songs — these are the Kenyan mixes, mashups and nonstop sets trending on YouTube right now.">Trending DJ Mixes</H2>
+      {items.length ? (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(280px,1fr))", gap: 16 }}>
+          {items.map((m, i) => (
+            <Reveal key={m.videoId} d={i * 60}>
+              <div onClick={() => setActive(m)} className="card" style={{ background: C.glass, backdropFilter: "blur(16px)", borderRadius: 16, overflow: "hidden", border: `1px solid ${C.line}`, cursor: "pointer" }}>
+                <div style={{ position: "relative", aspectRatio: "16/9" }}>
+                  {m.thumb && <img src={m.thumb} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />}
+                  <div style={{ position: "absolute", inset: 0, background: `linear-gradient(180deg,transparent 40%,${C.void}e0)` }} />
+                  <div style={{ position: "absolute", top: 12, left: 12, fontFamily: "'Space Mono',monospace", fontSize: 10, color: C.cyan, background: "rgba(0,0,0,.6)", padding: "4px 9px", borderRadius: 6, fontWeight: 700 }}>🎧 DJ MIX</div>
+                  <div style={{ position: "absolute", bottom: 12, left: 14, right: 14 }}>
+                    <div style={{ fontFamily: "'Outfit',sans-serif", fontWeight: 700, fontSize: 14, color: C.white, overflow: "hidden", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}>{m.title}</div>
+                  </div>
+                </div>
+                <div style={{ padding: "12px 16px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span style={{ fontFamily: "'Outfit',sans-serif", fontSize: 12, color: C.mist, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 140 }}>{m.artist}</span>
+                  <span style={{ fontFamily: "'Space Mono',monospace", fontWeight: 700, fontSize: 13, color: C.green }}>▶ {fmtN(m.views)}</span>
+                </div>
+              </div>
+            </Reveal>
+          ))}
+        </div>
+      ) : <div style={{ fontFamily: "'Outfit',sans-serif", color: C.mist, padding: "30px 0" }}>No Kenyan DJ mixes in the current trending feed. Check back after a refresh.</div>}
+      {active && <VideoModal track={active} onClose={() => setActive(null)} />}
+    </Section>
+  );
+}
+
+function Tribal({ items, loading }) {
+  const [active, setActive] = useState(null);
+  const [filter, setFilter] = useState("all");
+  if (loading) return <Section><H2 sub="Analysing the chart…">Tribal & Cultural</H2></Section>;
+  const genres = [
+    { id: "all", label: "All", color: C.orange },
+    { id: "mugithi", label: "Mugithi", color: "#FF5A1F" },
+    { id: "ohangla", label: "Ohangla", color: "#2F6BFF" },
+    { id: "benga", label: "Benga", color: "#FFD23F" },
+    { id: "kalenjin", label: "Kalenjin", color: "#16E085" },
+    { id: "kamba", label: "Kamba", color: "#9D5BFF" },
+    { id: "kisii", label: "Kisii", color: "#22CCFF" },
+  ];
+  const shown = filter === "all" ? items : items.filter(t => (t.tribal_genre || t.genre) === filter);
+  return (
+    <Section>
+      <Eye color={C.purple}>Roots · Tribal & Cultural</Eye>
+      <H2 sub="The heartbeat of Kenya's regions — Mugithi, Ohangla, Benga and more, surfaced live from the trending feed by our AI. Nobody else charts this.">Sounds of the Tribes</H2>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 26 }}>
+        {genres.map(g => (
+          <button key={g.id} onClick={() => setFilter(g.id)} style={{ fontFamily: "'Outfit',sans-serif", fontWeight: 600, fontSize: 12.5, padding: "8px 16px", borderRadius: 9, cursor: "pointer", border: `1px solid ${filter === g.id ? g.color : C.line}`, background: filter === g.id ? g.color : "rgba(255,255,255,.04)", color: filter === g.id ? C.void : C.mist, transition: "all .2s" }}>{g.label}</button>
+        ))}
+      </div>
+      {shown.length ? (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(260px,1fr))", gap: 16 }}>
+          {shown.map((t, i) => (
+            <Reveal key={t.videoId} d={i * 55}>
+              <div onClick={() => setActive(t)} className="card" style={{ background: C.glass, backdropFilter: "blur(16px)", borderRadius: 16, overflow: "hidden", border: `1px solid ${C.purple}33`, cursor: "pointer" }}>
+                <div style={{ position: "relative", aspectRatio: "16/10" }}>
+                  {t.thumb && <img src={t.thumb} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />}
+                  <div style={{ position: "absolute", inset: 0, background: `linear-gradient(180deg,transparent 45%,${C.void}e8)` }} />
+                  <div style={{ position: "absolute", top: 12, left: 12, fontFamily: "'Space Mono',monospace", fontSize: 10, color: C.white, background: C.purple + "cc", padding: "4px 10px", borderRadius: 6, fontWeight: 700, textTransform: "uppercase" }}>{t.tribal_genre || t.genre}</div>
+                  <div style={{ position: "absolute", bottom: 12, left: 14, right: 14 }}>
+                    <div style={{ fontFamily: "'Outfit',sans-serif", fontWeight: 700, fontSize: 14, color: C.white, overflow: "hidden", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}>{t.title}</div>
+                  </div>
+                </div>
+                <div style={{ padding: "12px 16px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span style={{ fontFamily: "'Outfit',sans-serif", fontSize: 12, color: C.mist, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 130 }}>{t.artist}</span>
+                  <span style={{ fontFamily: "'Space Mono',monospace", fontWeight: 700, fontSize: 13, color: C.green }}>▶ {fmtN(t.views)}</span>
+                </div>
+              </div>
+            </Reveal>
+          ))}
+        </div>
+      ) : <div style={{ fontFamily: "'Outfit',sans-serif", color: C.mist, padding: "30px 0" }}>No {filter !== "all" ? filter : "tribal"} tracks in the current trending feed. This updates as regional songs chart — try refreshing the main chart.</div>}
+      {active && <VideoModal track={active} onClose={() => setActive(null)} />}
+    </Section>
+  );
 }
 
 /* ════════════════════════════ STUDIO (persistent bg) ═════════════════════ */
@@ -481,11 +565,15 @@ function AIAnalyst({ items }) {
 export default function App() {
   const [tab, setTab] = useState("Charts");
   const [clips, setClips] = useState([]);
-  const [chart, setChart] = useState([]);
+  const [chart, setChart] = useState([]);          // Kenyan + collab songs
+  const [djMixes, setDjMixes] = useState([]);      // Kenyan DJ mixes
+  const [tribal, setTribal] = useState([]);        // tribal/cultural songs
+  const [aiEngine, setAiEngine] = useState("");
+  const [scanInfo, setScanInfo] = useState({ scanned: 0, matched: 0 });
   const [chartLoading, setChartLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [live, setLive] = useState(false);
-  const [events, setEvents] = useState([]); const [challenges, setChallenges] = useState([]); const [mixes, setMixes] = useState([]);
+  const [events, setEvents] = useState([]); const [challenges, setChallenges] = useState([]);
 
   // Load persisted backgrounds from Supabase
   const reloadClips = useCallback(async () => {
@@ -493,23 +581,25 @@ export default function App() {
     setClips(rows.map(r => r.source === "youtube" ? { id: r.id, type: "youtube", videoId: r.youtube_video_id, label: r.label } : { id: r.id, type: "upload", url: `${SB}/storage/v1/object/public/bg-clips/${r.storage_path}`, label: r.label }));
   }, []);
 
-  // Load the live chart: try cache first (instant), then refresh from YouTube
+  // Load the SMART live chart: cache for instant paint, then AI-filtered live fetch
   const loadChart = useCallback(async (force = false) => {
-    // 1. cache for instant paint
+    // 1. cache for instant paint (already-classified Kenyan songs)
     if (!force) {
       const cached = await sbGet("trending_now", "&order=rank.asc");
       if (cached.length) { setChart(cached.map(c => ({ ...c, videoId: c.video_id }))); setChartLoading(false); setLive(true); }
     }
-    // 2. live fetch
+    // 2. live smart fetch: trending -> DB match -> Gemini/Groq classify -> Kenyan only
     try {
-      const fresh = await ytTrending(20);
-      if (fresh.length) {
-        setChart(fresh); setLive(true);
-        // write snapshot to cache
+      const d = await ytSmart(40);
+      if (d.songs) {
+        setChart(d.songs); setDjMixes(d.mixes || []); setTribal(d.tribal || []);
+        setAiEngine(d.aiEngine || "db"); setScanInfo({ scanned: d.scanned, matched: d.matched });
+        setLive(true);
+        // cache the clean Kenyan song snapshot
         await sbDel("trending_now", "rank=gt.0");
-        await sbIns("trending_now", fresh.map(f => ({ rank: f.rank, video_id: f.videoId, title: f.title, artist: f.artist, views: f.views, likes: f.likes, comments: f.comments, thumb: f.thumb, published: f.published })));
+        if (d.songs.length) await sbIns("trending_now", d.songs.slice(0, 20).map(f => ({ rank: f.rank, video_id: f.videoId, title: f.title, artist: f.artist, views: f.views, likes: f.likes, comments: f.comments, thumb: f.thumb, published: f.published })));
       }
-    } catch (e) { console.error("trending:", e); }
+    } catch (e) { console.error("smart chart:", e); }
     setChartLoading(false);
   }, []);
 
@@ -518,19 +608,18 @@ export default function App() {
     loadChart();
     sbGet("events").then(setEvents);
     sbGet("challenges").then(setChallenges);
-    sbGet("mixes").then(setMixes);
   }, [reloadClips, loadChart]);
 
   const refresh = async () => { setRefreshing(true); await loadChart(true); setRefreshing(false); };
 
   const sections = {
-    Charts: <Charts items={chart} loading={chartLoading} onRefresh={refresh} refreshing={refreshing} />,
+    Charts: <Charts items={chart} loading={chartLoading} onRefresh={refresh} refreshing={refreshing} aiEngine={aiEngine} scanInfo={scanInfo} />,
     Rising: <Rising items={chart} loading={chartLoading} />,
+    Tribal: <Tribal items={tribal} loading={chartLoading} />,
     Genres: <Genres items={chart} loading={chartLoading} />,
-    Platforms: <Platforms items={chart} />,
+    "DJ Mixes": <DJMixes items={djMixes} loading={chartLoading} />,
     Events: <Events rows={events} />,
     Challenges: <Challenges rows={challenges} />,
-    Mixes: <Mixes rows={mixes} />,
     Studio: <Studio clips={clips} setClips={setClips} reloadClips={reloadClips} />,
   };
 
