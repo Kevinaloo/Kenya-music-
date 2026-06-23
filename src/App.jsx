@@ -87,14 +87,16 @@ function Mesh() {
 }
 
 /* ── video background ─────────────────────────────────────────────────────── */
-function VideoBG({ clips }) {
+function VideoBG({ clips, startKey = 0 }) {
   const [i, setI] = useState(0); const [fade, setFade] = useState(false); const cur = clips[i];
-  useEffect(() => { if (clips.length < 2) return; const id = setInterval(() => { setFade(true); setTimeout(() => { setI(p => (p + 1) % clips.length); setFade(false); }, 700); }, 10000); return () => clearInterval(id); }, [clips.length]);
+  // When startKey changes (intro just ended), jump to the first chosen clip and restart it
+  useEffect(() => { setI(0); setFade(false); }, [startKey]);
+  useEffect(() => { if (clips.length < 2) return; const id = setInterval(() => { setFade(true); setTimeout(() => { setI(p => (p + 1) % clips.length); setFade(false); }, 700); }, 10000); return () => clearInterval(id); }, [clips.length, startKey]);
   return (
     <div style={{ position: "absolute", inset: 0, overflow: "hidden", zIndex: 0 }}>
       {!clips.length && <Mesh />}
-      {cur?.type === "upload" && <video key={cur.url} src={cur.url} autoPlay muted loop playsInline style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", opacity: fade ? 0 : .5, transition: "opacity .7s" }} />}
-      {cur?.type === "youtube" && <iframe key={cur.videoId} title="bg" src={`https://www.youtube.com/embed/${cur.videoId}?autoplay=1&mute=1&controls=0&loop=1&playlist=${cur.videoId}&modestbranding=1&rel=0`} allow="autoplay;encrypted-media" frameBorder="0" style={{ position: "absolute", top: "50%", left: "50%", width: "177.78vh", minWidth: "100%", height: "100vh", minHeight: "56.25vw", transform: "translate(-50%,-50%)", opacity: fade ? 0 : .42, transition: "opacity .7s", pointerEvents: "none" }} />}
+      {cur?.type === "upload" && <video key={`${cur.url}-${startKey}`} src={cur.url} autoPlay muted loop playsInline style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", opacity: fade ? 0 : .5, transition: "opacity .7s" }} />}
+      {cur?.type === "youtube" && <iframe key={`${cur.videoId}-${startKey}`} title="bg" src={`https://www.youtube.com/embed/${cur.videoId}?autoplay=1&mute=1&controls=0&loop=1&playlist=${cur.videoId}&modestbranding=1&rel=0&start=0`} allow="autoplay;encrypted-media" frameBorder="0" style={{ position: "absolute", top: "50%", left: "50%", width: "177.78vh", minWidth: "100%", height: "100vh", minHeight: "56.25vw", transform: "translate(-50%,-50%)", opacity: fade ? 0 : .42, transition: "opacity .7s", pointerEvents: "none" }} />}
       <div style={{ position: "absolute", inset: 0, background: `linear-gradient(180deg,${C.ink}d8 0%,${C.ink}80 42%,${C.ink}f5 100%)` }} />
       <div style={{ position: "absolute", inset: 0, background: `radial-gradient(ellipse 85% 55% at 50% -5%,${C.blue}26,transparent 65%)` }} />
     </div>
@@ -117,52 +119,62 @@ function Section({ children, bg }) { return <div style={{ background: bg || "tra
 
 /* ════════════════════════════════ HERO ════════════════════════════════════ */
 /* ════════════════════════════ CINEMATIC INTRO ════════════════════════════ */
+/* ════════════════════════════ CINEMATIC INTRO ════════════════════════════ */
 function Intro({ top3, onDone }) {
-  // phases: 0 = "TRENDING NOW" kinetic title, 1/2/3 = each song reveal, 4 = dissolve out
+  // phases: 0 = TRENDING NOW · 1/2/3 = song reveals · 4 = NI MBAYA · then homepage
   const [phase, setPhase] = useState(0);
   const [out, setOut] = useState(false);
-  const skip = () => { setOut(true); setTimeout(onDone, 700); };
+  const finish = () => { setOut(true); setTimeout(onDone, 750); };
+  const ready = top3 && top3.length >= 3;
 
+  // Preload all 3 videos hidden so they're buffered before their slot (kills lag)
   useEffect(() => {
-    // wait until chart data exists; if it never comes within 4s, skip to homepage
-    if (!top3 || top3.length === 0) {
-      const t = setTimeout(() => { if (!top3 || top3.length === 0) skip(); }, 4000);
+    if (!ready) {
+      const t = setTimeout(() => { if (!ready) finish(); }, 4500);
       return () => clearTimeout(t);
     }
     const timeline = [
-      [0, 2600],          // TRENDING NOW title  (2.6s)
-      [1, 5200],          // #1 song            (5.2s)
-      [2, 5200],          // #2 song
-      [3, 5200],          // #3 song
+      [0, 2800],   // TRENDING NOW
+      [1, 5600],   // #1  (longer so the video actually shows)
+      [2, 5600],   // #2
+      [3, 5600],   // #3
+      [4, 2600],   // NI MBAYA beat card
     ];
     let acc = 0; const timers = [];
     timeline.forEach(([p, dur]) => { timers.push(setTimeout(() => setPhase(p), acc)); acc += dur; });
     timers.push(setTimeout(() => setOut(true), acc));
-    timers.push(setTimeout(onDone, acc + 700));
+    timers.push(setTimeout(onDone, acc + 750));
     return () => timers.forEach(clearTimeout);
-  }, [top3 && top3.length]);
+  }, [ready]);
 
   const cur = phase >= 1 && phase <= 3 ? top3[phase - 1] : null;
+  const medal = ["#FFD23F", "#D6DAEA", "#E0915A"];
 
   return (
-    <div style={{ position: "fixed", inset: 0, zIndex: 1000, background: C.void, overflow: "hidden", opacity: out ? 0 : 1, transition: "opacity .7s ease", pointerEvents: out ? "none" : "auto" }}>
-      {/* animated mesh always behind */}
+    <div style={{ position: "fixed", inset: 0, zIndex: 1000, background: C.void, overflow: "hidden", opacity: out ? 0 : 1, transition: "opacity .75s ease", pointerEvents: out ? "none" : "auto" }}>
       <Mesh />
-      <div style={{ position: "absolute", inset: 0, background: `radial-gradient(ellipse 70% 60% at 50% 50%, transparent, ${C.void} 80%)` }} />
+      <div style={{ position: "absolute", inset: 0, background: `radial-gradient(ellipse 70% 60% at 50% 50%, transparent, ${C.void} 82%)` }} />
 
-      {/* PHASE 0 — kinetic TRENDING NOW */}
+      {/* Hidden preloaders — all 3 videos buffer immediately on mount */}
+      {ready && phase >= 0 && phase <= 3 && (
+        <div style={{ position: "absolute", width: 1, height: 1, opacity: 0, overflow: "hidden", pointerEvents: "none" }}>
+          {top3.slice(0, 3).map((t, i) => i !== (phase - 1) && (
+            <iframe key={t.videoId} title={`pre${i}`} src={`https://www.youtube.com/embed/${t.videoId}?autoplay=1&mute=1&controls=0&start=15`} />
+          ))}
+        </div>
+      )}
+
+      {/* PHASE 0 — kinetic TRENDING NOW (responsive, fits all screens) */}
       {phase === 0 && (
-        <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", textAlign: "center" }}>
-          <div>
-            <div style={{ overflow: "hidden", marginBottom: 6 }}>
-              <div style={{ fontFamily: "'Space Mono',monospace", fontSize: "clamp(11px,2vw,15px)", letterSpacing: 8, color: C.gold, animation: "introLine .8s .1s both" }}>K E N Y A B E A T S</div>
-            </div>
-            <h1 style={{ margin: 0, lineHeight: .9 }}>
-              <span style={{ display: "block", overflow: "hidden" }}><span style={{ display: "inline-block", fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: "clamp(56px,15vw,200px)", color: C.white, letterSpacing: -4, animation: "introWord 1s .25s both" }}>TRENDING</span></span>
-              <span style={{ display: "block", overflow: "hidden" }}><span style={{ display: "inline-block", fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: "clamp(56px,15vw,200px)", letterSpacing: -4, background: `linear-gradient(100deg,${C.orange},${C.amber},${C.cyan})`, WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent", backgroundSize: "200% auto", animation: "introWord 1s .45s both, shimmer 3s linear infinite" }}>NOW</span></span>
+        <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", textAlign: "center", padding: "0 16px" }}>
+          <div style={{ width: "100%", maxWidth: 900 }}>
+            <div style={{ fontFamily: "'Space Mono',monospace", fontSize: "clamp(9px,2.4vw,14px)", letterSpacing: "0.4em", color: C.gold, animation: "introLine .8s .1s both", marginBottom: 8 }}>KENYABEATS</div>
+            <h1 style={{ margin: 0, lineHeight: .92 }}>
+              <span style={{ display: "block", overflow: "hidden" }}><span style={{ display: "inline-block", fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: "clamp(44px,11vw,128px)", color: C.white, letterSpacing: -2, animation: "introWord 1s .25s both" }}>TRENDING</span></span>
+              <span style={{ display: "block", overflow: "hidden" }}><span style={{ display: "inline-block", fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: "clamp(44px,11vw,128px)", letterSpacing: -2, background: `linear-gradient(100deg,${C.orange},${C.amber},${C.cyan})`, WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent", backgroundSize: "200% auto", animation: "introWord 1s .45s both, shimmer 3s linear infinite" }}>NOW</span></span>
             </h1>
-            <div style={{ marginTop: 26, display: "flex", justifyContent: "center" }}><div style={{ width: 240, maxWidth: "60vw", animation: "introLine .8s .8s both" }}><EQ bars={28} h={34} /></div></div>
-            <div style={{ marginTop: 18, fontFamily: "'Outfit',sans-serif", fontSize: 14, color: C.mist, animation: "introLine .8s 1s both" }}>Kenya's live top 3, right now</div>
+            <div style={{ marginTop: 24, display: "flex", justifyContent: "center" }}><div style={{ width: 220, maxWidth: "56vw" }}><EQ bars={26} h={32} /></div></div>
+            <div style={{ marginTop: 16, fontFamily: "'Outfit',sans-serif", fontSize: "clamp(13px,3.4vw,16px)", color: C.mist, animation: "introLine .8s 1s both" }}>Kenya's live top 3, right now</div>
           </div>
         </div>
       )}
@@ -170,55 +182,66 @@ function Intro({ top3, onDone }) {
       {/* PHASE 1-3 — song reveal with playing video */}
       {cur && (
         <div key={phase} style={{ position: "absolute", inset: 0 }}>
-          {/* background video for this track */}
-          <iframe title={cur.title} src={`https://www.youtube.com/embed/${cur.videoId}?autoplay=1&mute=1&controls=0&start=20&modestbranding=1&rel=0&playsinline=1`} allow="autoplay;encrypted-media" frameBorder="0"
-            style={{ position: "absolute", top: "50%", left: "50%", width: "177.78vh", minWidth: "100%", height: "100vh", minHeight: "56.25vw", transform: "translate(-50%,-50%)", opacity: .55, border: 0, pointerEvents: "none", animation: "introVidIn 1s both" }} />
-          <div style={{ position: "absolute", inset: 0, background: `linear-gradient(180deg,${C.void}aa,${C.void}55 40%,${C.void}f0)` }} />
+          <iframe title={cur.title} src={`https://www.youtube.com/embed/${cur.videoId}?autoplay=1&mute=1&controls=0&start=15&modestbranding=1&rel=0&playsinline=1`} allow="autoplay;encrypted-media" frameBorder="0"
+            style={{ position: "absolute", top: "50%", left: "50%", width: "177.78vh", minWidth: "100%", height: "100vh", minHeight: "56.25vw", transform: "translate(-50%,-50%)", opacity: .6, border: 0, pointerEvents: "none", animation: "introVidIn 1.2s both" }} />
+          <div style={{ position: "absolute", inset: 0, background: `linear-gradient(180deg,${C.void}99,${C.void}44 38%,${C.void}f2)` }} />
 
-          {/* giant rank numeral sweeping in */}
-          <div style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)", fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: "min(78vh,780px)", color: "rgba(255,255,255,0.06)", lineHeight: 1, animation: "introRank 1.1s both", pointerEvents: "none" }}>{cur.rank}</div>
+          <div style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)", fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: "min(70vh,640px)", color: "rgba(255,255,255,0.055)", lineHeight: 1, animation: "introRank 1.1s both", pointerEvents: "none" }}>{cur.rank}</div>
 
-          {/* content */}
-          <div style={{ position: "absolute", left: 0, right: 0, bottom: "12%", padding: "0 7vw" }}>
-            <div style={{ overflow: "hidden", marginBottom: 14 }}>
-              <div style={{ display: "inline-flex", alignItems: "center", gap: 14, animation: "introUp .7s .15s both" }}>
-                <span style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: "clamp(40px,8vw,90px)", lineHeight: 1, color: phase === 1 ? C.gold : phase === 2 ? "#D6DAEA" : "#E0915A" }}>#{cur.rank}</span>
-                <span style={{ fontFamily: "'Space Mono',monospace", fontSize: "clamp(10px,1.4vw,13px)", letterSpacing: 3, color: C.green, background: C.green + "18", border: `1px solid ${C.green}44`, padding: "6px 12px", borderRadius: 8 }}>▶ {fmtN(cur.views)} VIEWS</span>
-                {cur.origin_verified && <span style={{ fontFamily: "'Space Mono',monospace", fontSize: "clamp(9px,1.3vw,12px)", letterSpacing: 2, color: C.sky, background: C.sky + "14", border: `1px solid ${C.sky}33`, padding: "6px 11px", borderRadius: 8 }}>✓ VERIFIED KENYAN</span>}
+          <div style={{ position: "absolute", left: 0, right: 0, bottom: "13%", padding: "0 7vw" }}>
+            <div style={{ overflow: "hidden", marginBottom: 12 }}>
+              <div style={{ display: "inline-flex", alignItems: "center", gap: 12, flexWrap: "wrap", animation: "introUp .7s .15s both" }}>
+                <span style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: "clamp(34px,7vw,76px)", lineHeight: 1, color: medal[cur.rank - 1] || C.gold }}>#{cur.rank}</span>
+                <span style={{ fontFamily: "'Space Mono',monospace", fontSize: "clamp(9px,1.5vw,13px)", letterSpacing: 2, color: C.green, background: C.green + "18", border: `1px solid ${C.green}44`, padding: "5px 11px", borderRadius: 8 }}>▶ {fmtN(cur.views)} VIEWS</span>
+                {cur.origin_verified && <span style={{ fontFamily: "'Space Mono',monospace", fontSize: "clamp(8px,1.3vw,12px)", letterSpacing: 1.5, color: C.sky, background: C.sky + "14", border: `1px solid ${C.sky}33`, padding: "5px 10px", borderRadius: 8 }}>✓ VERIFIED KENYAN</span>}
               </div>
             </div>
             <div style={{ overflow: "hidden" }}>
-              <h2 style={{ margin: 0, fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: "clamp(34px,7vw,92px)", color: C.white, letterSpacing: -2, lineHeight: .98, animation: "introUp .8s .3s both", maxWidth: "92%" }}>{cur.title}</h2>
+              <h2 style={{ margin: 0, fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: "clamp(28px,6vw,80px)", color: C.white, letterSpacing: -1.5, lineHeight: 1, animation: "introUp .8s .3s both", maxWidth: "94%" }}>{cur.title}</h2>
             </div>
-            <div style={{ overflow: "hidden", marginTop: 10 }}>
-              <div style={{ fontFamily: "'Outfit',sans-serif", fontWeight: 500, fontSize: "clamp(16px,2.4vw,26px)", color: C.mist, animation: "introUp .8s .45s both" }}>{cur.artist} · <span style={{ color: C.amber, textTransform: "capitalize" }}>{cur.genre}</span></div>
+            <div style={{ overflow: "hidden", marginTop: 9 }}>
+              <div style={{ fontFamily: "'Outfit',sans-serif", fontWeight: 500, fontSize: "clamp(15px,2.4vw,24px)", color: C.mist, animation: "introUp .8s .45s both" }}>{cur.artist} · <span style={{ color: C.amber, textTransform: "capitalize" }}>{cur.genre}</span></div>
             </div>
-            {/* progress dots */}
-            <div style={{ display: "flex", gap: 8, marginTop: 30, animation: "introUp .8s .6s both" }}>
-              {[1, 2, 3].map(n => <div key={n} style={{ height: 4, width: n === phase ? 44 : 22, borderRadius: 3, background: n === phase ? `linear-gradient(90deg,${C.orange},${C.cyan})` : "rgba(255,255,255,.18)", transition: "all .4s" }} />)}
+            <div style={{ display: "flex", gap: 8, marginTop: 26, animation: "introUp .8s .6s both" }}>
+              {[1, 2, 3].map(n => <div key={n} style={{ height: 4, width: n === phase ? 42 : 20, borderRadius: 3, background: n === phase ? `linear-gradient(90deg,${C.orange},${C.cyan})` : "rgba(255,255,255,.18)", transition: "all .4s" }} />)}
             </div>
           </div>
         </div>
       )}
 
-      {/* skip */}
-      <button onClick={skip} style={{ position: "absolute", top: 24, right: 24, zIndex: 5, fontFamily: "'Outfit',sans-serif", fontWeight: 600, fontSize: 13, padding: "9px 18px", background: "rgba(255,255,255,.08)", color: C.white, border: `1px solid ${C.line}`, borderRadius: 30, cursor: "pointer", backdropFilter: "blur(10px)", display: "flex", alignItems: "center", gap: 7 }}>
+      {/* PHASE 4 — NI MBAYA beat card */}
+      {phase === 4 && (
+        <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", textAlign: "center", padding: "0 16px" }}>
+          <div style={{ animation: "niMbayaPop .6s both" }}>
+            <div style={{ display: "flex", justifyContent: "center", gap: 5, marginBottom: 22 }}>
+              {Array.from({ length: 5 }).map((_, i) => <div key={i} style={{ width: 7, borderRadius: 4, height: 40, background: `linear-gradient(180deg,${C.orange},${C.cyan})`, animation: `beatBar .5s ${i * 0.09}s infinite alternate ease-in-out` }} />)}
+            </div>
+            <h1 style={{ margin: 0, fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: "clamp(56px,15vw,170px)", letterSpacing: -3, lineHeight: .9, color: C.white, animation: "niMbayaShake .5s .2s both" }}>
+              NI <span style={{ background: `linear-gradient(100deg,${C.orange},${C.gold},${C.pink})`, WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent", backgroundSize: "200% auto", animation: "shimmer 2s linear infinite" }}>MBAYA</span>
+            </h1>
+            <div style={{ display: "flex", justifyContent: "center", gap: 5, marginTop: 22 }}>
+              {Array.from({ length: 5 }).map((_, i) => <div key={i} style={{ width: 7, borderRadius: 4, height: 40, background: `linear-gradient(180deg,${C.cyan},${C.orange})`, animation: `beatBar .5s ${i * 0.09 + 0.2}s infinite alternate ease-in-out` }} />)}
+            </div>
+          </div>
+        </div>
+      )}
+
+      <button onClick={finish} style={{ position: "absolute", top: 24, right: 24, zIndex: 5, fontFamily: "'Outfit',sans-serif", fontWeight: 600, fontSize: 13, padding: "9px 18px", background: "rgba(255,255,255,.08)", color: C.white, border: `1px solid ${C.line}`, borderRadius: 30, cursor: "pointer", backdropFilter: "blur(10px)", display: "flex", alignItems: "center", gap: 7 }}>
         Skip intro <span style={{ fontSize: 15 }}>→</span>
       </button>
 
-      {/* bottom brand bar */}
-      <div style={{ position: "absolute", bottom: 22, left: 0, right: 0, textAlign: "center", fontFamily: "'Space Mono',monospace", fontSize: 10, color: C.dim, letterSpacing: 3, animation: "introLine 1s .4s both" }}>
+      {phase <= 3 && <div style={{ position: "absolute", bottom: 22, left: 0, right: 0, textAlign: "center", fontFamily: "'Space Mono',monospace", fontSize: "clamp(8px,2.2vw,10px)", color: C.dim, letterSpacing: 3, animation: "introLine 1s .4s both" }}>
         LIVE FROM YOUTUBE · REGION KE · AI-RANKED
-      </div>
+      </div>}
     </div>
   );
 }
 
-function Hero({ tab, setTab, clips, live, ticker }) {
+function Hero({ tab, setTab, clips, live, ticker, bgKey }) {
   const tabs = ["Charts", "Rising", "Tribal", "Genres", "DJ Mixes", "Events", "Challenges", "Studio"];
   return (
     <header style={{ position: "relative", minHeight: "94vh", display: "flex", flexDirection: "column", overflow: "hidden" }}>
-      <VideoBG clips={clips} />
+      <VideoBG clips={clips} startKey={bgKey} />
       <div style={{ position: "relative", zIndex: 2, maxWidth: 1280, width: "100%", margin: "0 auto", padding: "0 24px", flex: 1, display: "flex", flexDirection: "column" }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "22px 0" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 13 }}>
@@ -670,6 +693,7 @@ function AIAnalyst({ items }) {
 export default function App() {
   const [tab, setTab] = useState("Charts");
   const [showIntro, setShowIntro] = useState(true);
+  const [bgKey, setBgKey] = useState(0);
   const [clips, setClips] = useState([]);
   const [chart, setChart] = useState([]);          // Kenyan + collab songs
   const [djMixes, setDjMixes] = useState([]);      // Kenyan DJ mixes
@@ -743,7 +767,10 @@ export default function App() {
         @keyframes introLine{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:none}}
         @keyframes introUp{from{opacity:0;transform:translateY(120%)}to{opacity:1;transform:none}}
         @keyframes introRank{from{opacity:0;transform:translate(-50%,-50%) scale(1.6)}to{opacity:1;transform:translate(-50%,-50%) scale(1)}}
-        @keyframes introVidIn{from{opacity:0;transform:translate(-50%,-50%) scale(1.12)}to{opacity:.55;transform:translate(-50%,-50%) scale(1)}}
+        @keyframes introVidIn{from{opacity:0;transform:translate(-50%,-50%) scale(1.12)}to{opacity:.6;transform:translate(-50%,-50%) scale(1)}}
+        @keyframes niMbayaPop{from{opacity:0;transform:scale(.6)}to{opacity:1;transform:scale(1)}}
+        @keyframes niMbayaShake{0%{transform:translateX(0)}20%{transform:translateX(-8px)}40%{transform:translateX(8px)}60%{transform:translateX(-5px)}80%{transform:translateX(5px)}100%{transform:translateX(0)}}
+        @keyframes beatBar{from{height:14px}to{height:54px}}
         .card{transition:transform .25s cubic-bezier(.2,.8,.2,1),box-shadow .25s,border-color .25s}
         .card:hover{transform:translateY(-4px)}
         .row{transition:transform .2s,border-color .2s}
@@ -756,8 +783,8 @@ export default function App() {
         input::placeholder{color:${C.mist}66}input:focus{border-color:${C.blue}!important}
       `}</style>
 
-      {showIntro && <Intro top3={chart.slice(0, 3)} onDone={() => setShowIntro(false)} />}
-      <Hero tab={tab} setTab={setTab} clips={clips} live={live} ticker={chart.slice(0, 12)} />
+      {showIntro && <Intro top3={chart.slice(0, 3)} onDone={() => { setShowIntro(false); setBgKey(k => k + 1); }} />}
+      <Hero tab={tab} setTab={setTab} clips={clips} live={live} ticker={chart.slice(0, 12)} bgKey={bgKey} />
       <main style={{ background: C.ink }}><div key={tab} style={{ animation: "fadeUp .45s both" }}>{sections[tab]}</div></main>
       <AIAnalyst items={chart} />
       <footer style={{ background: C.void, borderTop: `1px solid ${C.line}`, padding: "30px 24px", textAlign: "center" }}>
